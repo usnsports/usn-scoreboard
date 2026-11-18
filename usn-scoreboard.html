@@ -1,0 +1,2479 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>USN Basketball Scoreboard</title>
+<!--
+  USN BASKETBALL SCOREBOARD — one file, no installs.
+
+  HOW IT OPENS
+    usn-scoreboard.html                 scoreboard + control panel side by side (try it out, or use on a TV)
+    usn-scoreboard.html?view=overlay    graphics only, transparent background (OBS browser source). ?output does the same.
+    usn-scoreboard.html?view=control    control panel only, with a small preview (OBS custom dock, or a phone)
+  Inside an OBS browser source the page switches to overlay mode by itself.
+
+  HOW THE WINDOWS TALK
+    The control panel owns the game. Every change is saved to localStorage and sent to the
+    other windows over a BroadcastChannel. Both windows must be on the SAME computer and in
+    the SAME program (both in OBS, or both in the same Chrome/Edge profile).
+    To run it from a phone or another laptop, turn on remote control in the Remote tab
+    (search "REMOTE CONTROL" below for how it works).
+
+  WHERE TO TWEAK THE CODE
+    1. CSS: scoreboard look ............ search "SCOREBOARD STYLES"
+    2. CSS: animations ................. search "ANIMATIONS"
+    3. JS : default teams, rules, look .. search "DEFAULTS"
+    4. JS : keyboard shortcuts .......... search "KEYBOARD SHORTCUTS"
+    6. Name graphic (lower third) ....... search "LOWER THIRD" (styles) and "lower third (name graphic)" (script)
+    7. Lineups, schedule, standings ..... search "FULL-SCREEN GRAPHICS" (styles) and "BROADCAST GRAPHICS PACKAGE" (script)
+    8. Stats tab + half-time report ...... search "half-time report" (styles) and "STATS AND HALF-TIME REPORT" (script)
+    9. Countdown screen (off air) ........ search "COUNTDOWN SCREEN" (styles and script)
+    5. JS : sounds ...................... search "SOUND"
+-->
+<style>
+/* ============================================================
+   PAGE + STAGE
+   The stage is a fixed 1920x1080 canvas that is scaled to fit
+   whatever window it is in, so the layout never changes.
+   ============================================================ */
+:root{
+  --d:1;                 /* animation duration multiplier (1 / speed) */
+  --font:'Barlow Condensed';
+  --clock-bg:#101216; --clock-tx:#ffffff;
+  --meta-bg:#e9eaec;  --meta-tx:#15171b;
+  --accent:#ffc629;   --low:#ff3b30;
+  --radius:10px;
+}
+html,body{margin:0;height:100%}
+body{background:transparent;overflow:hidden;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
+[hidden]{display:none!important}
+#viewport{position:relative;overflow:hidden}
+#stage{position:absolute;left:0;top:0;width:1920px;height:1080px;transform-origin:0 0}
+.checker{background:#3a3f4a repeating-conic-gradient(#343944 0% 25%,#3f4551 0% 50%) 0 0/28px 28px}
+
+/* overlay: scoreboard only */
+.mode-overlay #viewport{position:fixed;left:0;top:0;right:0;bottom:0}
+.mode-overlay #panel,.mode-overlay #panelToggle{display:none}
+/* combined: scoreboard on the left, panel on the right */
+.mode-combined{display:flex}
+.mode-combined #viewport{flex:1;height:100vh;min-width:0}
+.mode-combined #panel{width:480px;flex:none;height:100vh;overflow-y:auto}
+.mode-combined.panel-hidden #panel{display:none}
+/* control: small preview on top, panel underneath */
+.mode-control{overflow:auto}
+.mode-control #viewport{position:sticky;top:0;z-index:5;width:100%;border-bottom:1px solid #2a2f39}
+.mode-control #stage{width:800px;height:410px}
+.mode-control #panelToggle{display:none}
+.mode-control .tabs{position:static}
+
+/* ============================================================
+   SCOREBOARD STYLES
+   Sizes are in px for a 730 x 208 scorebug; the whole thing is
+   scaled with the "Size" slider, so change proportions here.
+   ============================================================ */
+#bugwrap{position:absolute;width:730px}
+#bug{position:relative;z-index:1;display:flex;height:208px;border-radius:var(--radius);overflow:hidden;
+  font-family:var(--font),'Arial Narrow','Roboto Condensed',Impact,sans-serif;font-weight:700;
+  box-shadow:0 10px 30px rgba(0,0,0,.45);
+  transition:opacity calc(.35s*var(--d)),transform calc(.35s*var(--d))}
+#bug.off{opacity:0;transform:translateY(22px)}
+
+/* left column: game clock on top, period + shot clock below */
+.timecol{width:210px;flex:none;display:flex;flex-direction:column}
+.clock{height:122px;flex:none;display:flex;align-items:center;justify-content:center;position:relative;
+  background:var(--clock-bg);color:var(--clock-tx);font-size:78px;line-height:1}
+.gloss .clock{background-image:linear-gradient(rgba(255,255,255,.10),rgba(255,255,255,0) 60%)}
+.clock .dg{display:inline-block;width:.52em;text-align:center}
+.clock .pt{display:inline-block;width:.24em;text-align:center}
+.clock.low{color:var(--low)}
+.meta{flex:1;display:flex;align-items:center;justify-content:space-around;padding:0 10px;
+  background:var(--meta-bg);color:var(--meta-tx)}
+#period{font-size:46px;line-height:1;display:inline-block;white-space:nowrap}
+.shot{width:62px;height:62px;border-radius:50%;flex:none;display:flex;align-items:center;justify-content:center;
+  background:var(--meta-tx);color:var(--meta-bg);font-size:38px;line-height:1}
+.shot.low{background:var(--low);color:#fff}
+.noshot .shot,.final .shot{display:none}
+
+/* team rows */
+.rows{flex:1;min-width:0;display:flex;flex-direction:column}
+.row{flex:1;min-height:0;display:flex;position:relative;color:var(--tx)}
+.row + .row{border-top:2px solid rgba(0,0,0,.4)}
+.bonus{width:40px;flex:none;display:flex;align-items:center;justify-content:center;background:#272c36;
+  transition:background calc(.3s*var(--d))}
+.bonus span{transform:rotate(-90deg);font-size:19px;letter-spacing:.14em;white-space:nowrap;color:rgba(255,255,255,.2);
+  transition:color calc(.3s*var(--d))}
+.row.inbonus .bonus{background:var(--accent)}
+.row.inbonus .bonus span{color:#111}
+.teamcell{flex:1;min-width:0;position:relative;overflow:hidden;display:flex;align-items:center;gap:14px;
+  padding:0 34px 0 14px;background:linear-gradient(90deg,var(--c1),var(--c1d))}
+.gloss .teamcell::before,.gloss .scorecell::before{content:'';position:absolute;left:0;right:0;top:0;height:55%;
+  background:linear-gradient(rgba(255,255,255,.16),rgba(255,255,255,0));pointer-events:none}
+.logo{width:76px;height:76px;flex:none;position:relative;border-radius:50%;display:flex;align-items:center;justify-content:center}
+.logo.badge{overflow:hidden;background:rgba(0,0,0,.28);box-shadow:0 0 0 3px var(--c2),inset 0 0 0 2px rgba(255,255,255,.14)}
+.logo img{max-width:100%;max-height:100%;object-fit:contain;display:block}
+.logo.badge img{max-width:80%;max-height:80%}
+.mono{font-size:42px;line-height:1;color:#fff}
+.names{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center}
+.abbr{align-self:flex-start;display:inline-block;transform-origin:0 50%;font-size:58px;line-height:.95;white-space:nowrap;
+  text-transform:uppercase;text-shadow:0 2px 0 rgba(0,0,0,.22)}
+.sub{display:flex;align-items:center;gap:9px;height:20px;margin-top:3px;font-size:16px;font-weight:600;white-space:nowrap;opacity:.92}
+.tos{display:inline-flex;gap:3px}
+.tos i{width:11px;height:6px;border-radius:2px;background:currentColor}
+.tos i.used{opacity:.25}
+.nostats .tos,.nostats .fls{display:none}
+.poss{position:absolute;right:10px;top:50%;margin-top:-9px;width:0;height:0;border:9px solid transparent;border-left:0;
+  border-right:13px solid currentColor;opacity:0;transform:translateX(12px);
+  transition:opacity calc(.25s*var(--d)),transform calc(.25s*var(--d))}
+.row.haspos .poss{opacity:1;transform:none}
+.scorecell{width:150px;flex:none;position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;
+  background:var(--c2);color:var(--tx2);font-size:92px;line-height:1}
+.score{display:block}
+
+/* banner strip that slides out from behind the scorebug */
+#strip{position:absolute;left:0;right:0;height:calc(54px + var(--radius));overflow:hidden;pointer-events:none}
+#strip.above{bottom:calc(100% - var(--radius))}
+#strip.below{top:calc(100% - var(--radius))}
+#stripInner{position:absolute;left:0;right:0;top:0;bottom:0;display:flex;justify-content:center;gap:16px;
+  font-family:var(--font),'Arial Narrow',Impact,sans-serif;font-weight:700;font-size:32px;letter-spacing:.06em;
+  text-transform:uppercase;white-space:nowrap;background:var(--sb,#101216);color:var(--st,#fff);
+  transition:transform calc(.45s*var(--d)) cubic-bezier(.2,.8,.2,1)}
+#stripInner span{line-height:54px}
+#stripInner .dim{opacity:.7}
+.above #stripInner{align-items:flex-start;transform:translateY(101%);border-radius:var(--radius) var(--radius) 0 0}
+.below #stripInner{align-items:flex-end;transform:translateY(-101%);border-radius:0 0 var(--radius) var(--radius)}
+#strip.on #stripInner{transform:none}
+
+/* ============================================================
+   ANIMATIONS
+   Every duration is multiplied by var(--d) so the Speed slider
+   in the control panel changes them all together.
+   ============================================================ */
+/* score: old number rolls up and out, new one rolls in, cell flashes */
+@keyframes rollIn{from{transform:translateY(90%);opacity:0}to{transform:none;opacity:1}}
+@keyframes rollOut{to{transform:translateY(-90%);opacity:0}}
+@keyframes flash{from{opacity:.85}to{opacity:0}}
+@keyframes lift{from{filter:brightness(1.5)}to{filter:brightness(1)}}
+.score.in{animation:rollIn calc(.42s*var(--d)) cubic-bezier(.2,.9,.3,1.25)}
+.ghost{position:absolute;left:0;top:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;
+  animation:rollOut calc(.3s*var(--d)) ease-in forwards}
+.scorecell::after{content:'';position:absolute;left:0;top:0;right:0;bottom:0;background:#fff;opacity:0;pointer-events:none}
+.scorecell.flash::after{animation:flash calc(.7s*var(--d)) ease-out}
+.scorecell.flash3::after{animation:flash calc(.5s*var(--d)) ease-out 3}
+.teamcell.lift{animation:lift calc(.8s*var(--d)) ease-out}
+
+/* 3-pointer: a banner wipes across the team's row */
+@keyframes sweep{0%{clip-path:inset(0 100% 0 0)}16%{clip-path:inset(0 0 0 0)}80%{clip-path:inset(0 0 0 0)}100%{clip-path:inset(0 0 0 100%)}}
+@keyframes sweepText{0%{transform:translateX(-40px) skewX(-8deg)}16%{transform:translateX(0) skewX(-8deg)}100%{transform:translateX(14px) skewX(-8deg)}}
+.sweep{position:absolute;left:0;top:0;right:0;bottom:0;z-index:3;display:flex;align-items:center;justify-content:center;
+  background:var(--tx);color:var(--c1);font-size:52px;letter-spacing:.02em;white-space:nowrap;
+  clip-path:inset(0 100% 0 0);pointer-events:none}
+.sweep span{display:inline-block;transform:skewX(-8deg)}
+.sweep.go{animation:sweep calc(2.1s*var(--d)) cubic-bezier(.7,0,.2,1) both}
+.sweep.go span{animation:sweepText calc(2.1s*var(--d)) ease-out both}
+
+/* logo: pulse + a shine that crosses the badge */
+@keyframes logoPulse{0%{transform:scale(1)}30%{transform:scale(1.2)}100%{transform:scale(1)}}
+@keyframes shine{from{transform:translateX(-120%)}to{transform:translateX(120%)}}
+.logo.pulse{animation:logoPulse calc(.6s*var(--d)) ease-out}
+.logo.badge::after{content:'';position:absolute;left:-20%;top:-20%;right:-20%;bottom:-20%;transform:translateX(-120%);
+  background:linear-gradient(115deg,rgba(255,255,255,0) 40%,rgba(255,255,255,.8) 50%,rgba(255,255,255,0) 60%)}
+.logo.badge.pulse::after{animation:shine calc(.7s*var(--d)) ease-out}
+
+/* shot clock: beat on every second in the last 5; flash on a violation */
+@keyframes beat{from{transform:scale(1.16)}to{transform:scale(1)}}
+@keyframes viol{0%{background:#fff;color:var(--low)}50%{background:var(--low);color:#fff}}
+.shot.beat{animation:beat calc(.5s*var(--d)) ease-out}
+.shot.viol{animation:viol calc(.3s*var(--d)) steps(1) 5}
+
+/* buzzer: clock cell flashes and a red frame blinks round the bug */
+@keyframes buzz{0%{background-color:var(--low);color:#fff}50%{background-color:var(--clock-bg);color:var(--low)}}
+@keyframes frame{0%{opacity:1}50%{opacity:0}}
+.clock.buzz{animation:buzz calc(.36s*var(--d)) steps(1) 6}
+#bug::after{content:'';position:absolute;left:0;top:0;right:0;bottom:0;border:5px solid var(--low);border-radius:var(--radius);
+  opacity:0;pointer-events:none;z-index:4}
+#bug.buzz::after{animation:frame calc(.36s*var(--d)) steps(1) 6}
+
+/* period label flips when the period changes */
+#period.flip{animation:rollIn calc(.45s*var(--d)) cubic-bezier(.2,.9,.3,1.25)}
+
+/* intro: clock column slides in, team rows wipe in, logos pop */
+@keyframes inLeft{from{transform:translateX(-101%)}to{transform:none}}
+@keyframes wipe{from{clip-path:inset(0 100% 0 0)}to{clip-path:inset(0 0 0 0)}}
+@keyframes pop{0%{transform:scale(0)}65%{transform:scale(1.15)}100%{transform:scale(1)}}
+@keyframes shadowIn{from{box-shadow:0 0 0 rgba(0,0,0,0)}}
+#bug.intro{animation:shadowIn calc(1.1s*var(--d)) ease-out}
+#bug.intro .timecol{animation:inLeft calc(.6s*var(--d)) cubic-bezier(.2,.8,.2,1) both}
+#bug.intro .row{animation:wipe calc(.6s*var(--d)) cubic-bezier(.2,.8,.2,1) both}
+#bug.intro .row:nth-child(1){animation-delay:calc(.22s*var(--d))}
+#bug.intro .row:nth-child(2){animation-delay:calc(.34s*var(--d))}
+#bug.intro .logo{animation:pop calc(.5s*var(--d)) calc(.6s*var(--d)) both}
+#bug.intro .score{animation:rollIn calc(.45s*var(--d)) calc(.8s*var(--d)) both}
+
+/* ============================================================
+   COUNTDOWN SCREEN (off air: pregame / halftime)
+   Sits exactly where the scorebug sits (Look tab: position, size,
+   distance from the edge) and uses the same fonts and colours.
+     [ away team        | home team        ]   teams side by side
+     [      TIP-OFF IN   14:59             ]   countdown underneath
+   Halftime adds a HALFTIME band on top and each team's score.
+   ============================================================ */
+#cdwrap{position:absolute;width:730px}
+#cd{position:relative;z-index:1;border-radius:var(--radius);overflow:hidden;
+  font-family:var(--font),'Arial Narrow','Roboto Condensed',Impact,sans-serif;font-weight:700;
+  box-shadow:0 10px 30px rgba(0,0,0,.45);
+  transition:opacity calc(.35s*var(--d)),transform calc(.35s*var(--d))}
+#cd.off{opacity:0;transform:translateY(22px)}
+.cd-tag{display:none;height:46px;align-items:center;justify-content:center;gap:16px;position:relative;
+  background:var(--accent);color:#111;font-size:30px;line-height:1;letter-spacing:.24em;text-transform:uppercase}
+.cd-tag span{padding-left:.24em}
+.cd-tag i{width:9px;height:9px;border-radius:50%;background:currentColor;opacity:.5}
+#cd.half .cd-tag{display:flex}
+.cd-teams{display:flex;height:112px}
+.cd-team{flex:1;min-width:0;position:relative;overflow:hidden;display:flex;align-items:center;gap:14px;color:var(--tx);
+  background:linear-gradient(90deg,var(--c1),var(--c1d))}
+.cd-team.r{flex-direction:row-reverse;background:linear-gradient(270deg,var(--c1),var(--c1d))}
+.cd-team + .cd-team{border-left:2px solid rgba(0,0,0,.4)}
+.cd-team .logo{width:66px;height:66px;margin-left:18px}
+.cd-team.r .logo{margin-left:0;margin-right:18px}
+.cd-team .mono{font-size:36px}
+.cd-names{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center;align-items:flex-start;padding-right:14px}
+.cd-team.r .cd-names{align-items:flex-end;padding-right:0;padding-left:14px}
+.cd-abbr{display:inline-block;transform-origin:0 50%;font-size:54px;line-height:.95;white-space:nowrap;text-transform:uppercase;text-shadow:0 2px 0 rgba(0,0,0,.22)}
+.cd-team.r .cd-abbr{transform-origin:100% 50%}
+.cd-rec{margin-top:4px;font-size:17px;font-weight:600;white-space:nowrap;opacity:.9}
+.cd-score{display:none;width:112px;flex:none;align-self:stretch;position:relative;overflow:hidden;align-items:center;justify-content:center;
+  background:var(--c2);color:var(--tx2);font-size:76px;line-height:1}
+#cd.half .cd-score{display:flex}
+#cd.half .cd-rec{display:none}
+.gloss .cd-team::before,.gloss .cd-score::before{content:'';position:absolute;left:0;right:0;top:0;height:55%;
+  background:linear-gradient(rgba(255,255,255,.16),rgba(255,255,255,0));pointer-events:none}
+.cd-bar{height:100px;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden;
+  background:var(--clock-bg);color:var(--clock-tx)}
+.cd-in{display:flex;align-items:center;gap:28px;white-space:nowrap;transform-origin:50% 50%}   /* shrunk by the script if it is too wide */
+.gloss .cd-bar{background-image:linear-gradient(rgba(255,255,255,.10),rgba(255,255,255,0) 60%)}
+.cd-lab{font-size:30px;line-height:1;letter-spacing:.16em;text-transform:uppercase;white-space:nowrap;opacity:.72}
+#cd.half .cd-lab{color:var(--accent);opacity:1}
+.cd-time{font-size:82px;line-height:1;white-space:nowrap}
+.cd-time .dg{display:inline-block;width:.52em;text-align:center}
+.cd-time .pt{display:inline-block;width:.24em;text-align:center}
+@keyframes cdHold{50%{opacity:.45}}
+.cd-time.zero{animation:cdHold 1.6s ease-in-out infinite}
+@keyframes wipeL{from{clip-path:inset(0 0 0 100%)}to{clip-path:inset(0 0 0 0)}}
+@keyframes inUp{from{transform:translateY(101%)}to{transform:none}}
+@keyframes inDown{from{transform:translateY(-101%)}to{transform:none}}
+#cd.intro{animation:shadowIn calc(1.1s*var(--d)) ease-out}
+#cd.intro .cd-tag{animation:inDown calc(.45s*var(--d)) cubic-bezier(.2,.8,.2,1) both}
+#cd.intro .cd-team{animation:wipe calc(.6s*var(--d)) calc(.1s*var(--d)) cubic-bezier(.2,.8,.2,1) both}
+#cd.intro .cd-team.r{animation-name:wipeL;animation-delay:calc(.2s*var(--d))}
+#cd.intro .cd-bar{animation:inUp calc(.5s*var(--d)) calc(.3s*var(--d)) cubic-bezier(.2,.8,.2,1) both}
+#cd.intro .logo{animation:pop calc(.5s*var(--d)) calc(.6s*var(--d)) both}
+#cd.intro .cd-score{animation:rollIn calc(.45s*var(--d)) calc(.75s*var(--d)) both}
+
+/* ============================================================
+   LOWER THIRD (name graphic)
+   [ left name ][ logo block ][ right name ]   two commentators
+                [ logo block ][ name / line 2 ] one person
+   Enter: logo pops, bars wipe out from behind it, text fades in.
+   Exit : the same steps in reverse. About 0.6 s each way.
+   ============================================================ */
+#lt{position:absolute;z-index:3;display:inline-grid;width:max-content;grid-template-columns:1fr auto 1fr;align-items:center;white-space:nowrap;
+  pointer-events:none;font-family:var(--font),'Arial Narrow','Roboto Condensed',Impact,sans-serif}
+#lt.solo{grid-template-columns:auto auto}
+#lt.solo .ltL{display:none}
+.ltlogo{position:relative;z-index:2;width:250px;height:92px;border-radius:9px;display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(var(--lt-logo-hi),var(--lt-logo));
+  box-shadow:0 8px 22px rgba(0,0,0,.4),inset 0 1px 0 rgba(255,255,255,.5),inset 0 -2px 0 rgba(0,0,0,.12);
+  transform:scale(0);opacity:0;
+  transition:transform calc(.24s*var(--d)) cubic-bezier(.6,0,.8,.2) calc(.36s*var(--d)),opacity calc(.08s*var(--d)) linear calc(.52s*var(--d))}
+.ltlogo img{width:186px;height:auto;display:block;filter:drop-shadow(0 2px 2px rgba(0,40,90,.28))}
+.ltbar{position:relative;z-index:1;height:76px;min-width:300px;display:flex;align-items:center;justify-content:center;padding:0 46px;
+  background:linear-gradient(var(--lt-bar-hi),var(--lt-bar));color:var(--lt-tx);
+  box-shadow:0 8px 22px rgba(0,0,0,.35),inset 0 1px 0 rgba(255,255,255,.12);
+  transition:clip-path calc(.28s*var(--d)) cubic-bezier(.65,0,.25,1) calc(.12s*var(--d))}
+.ltbar::after{content:'';position:absolute;left:0;right:0;bottom:0;height:3px;background:var(--lt-logo)}
+.ltL{margin-right:-12px;padding-right:58px;border-radius:7px 0 0 7px;clip-path:inset(-40px 0 -40px 100%)}
+.ltR{margin-left:-12px;padding-left:58px;border-radius:0 7px 7px 0;clip-path:inset(-40px 100% -40px 0)}
+.ltL::after{border-radius:0 0 0 7px}
+.ltR::after{border-radius:0 0 7px 0}
+#lt.solo .ltR{min-width:360px;justify-content:flex-start}
+#lt.hassub .ltbar{height:92px}
+.lttxt{display:flex;flex-direction:column;align-items:center;opacity:0;transform:translateY(7px);
+  transition:opacity calc(.14s*var(--d)) ease,transform calc(.14s*var(--d)) ease}
+#lt.solo .lttxt{align-items:flex-start}
+.ltname{font-size:40px;font-weight:700;line-height:1;letter-spacing:.05em;text-transform:uppercase;text-shadow:0 2px 0 rgba(0,0,0,.3)}
+.ltsub{margin-top:6px;font-size:21px;font-weight:600;line-height:1;letter-spacing:.1em;text-transform:uppercase;color:var(--lt-sub)}
+#lt.on .ltlogo{transform:scale(1);opacity:1;
+  transition:transform calc(.32s*var(--d)) cubic-bezier(.2,1.5,.4,1) 0s,opacity calc(.06s*var(--d)) linear 0s}
+#lt.on .ltbar{transition-delay:calc(.2s*var(--d))}
+#lt.on .ltL,#lt.on .ltR{clip-path:inset(-40px -40px -40px -40px)}
+#lt.on .lttxt{opacity:1;transform:none;
+  transition:opacity calc(.2s*var(--d)) ease calc(.4s*var(--d)),transform calc(.2s*var(--d)) ease calc(.4s*var(--d))}
+#lt.noanim *{transition:none!important}
+
+/* ============================================================
+   FULL-SCREEN GRAPHICS (starting lineups, schedule, standings)
+   One panel at a time, centred inside the title-safe area
+   (5% margin). Panels are deep navy, never pure black.
+     --tc / --tc2  team colour and its darker shade
+     --tca         accent for borders and glow (lightened if the team colour is dark)
+     --gd          duration multiplier from the graphics Speed slider
+     --i           row number, used to stagger the rows
+   ============================================================ */
+#gfx{position:absolute;left:0;top:0;width:1920px;height:1080px;z-index:2;display:flex;align-items:center;justify-content:center;
+  padding:54px 96px;box-sizing:border-box;pointer-events:none;color:#f4f6fb;--gd:1;
+  --sans:'Barlow',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+  font-family:var(--font),'Arial Narrow','Roboto Condensed',Impact,sans-serif;font-weight:700}
+#gfx *{box-sizing:border-box}
+.mode-control #gfx{left:50%;transform-origin:0 0;transform:translateX(-364.8px) scale(.38)}
+.gp{position:relative;border-radius:18px;overflow:hidden;background:linear-gradient(180deg,#161d2d,#0d1117);
+  box-shadow:0 0 0 2px var(--tca),0 0 36px var(--glow),0 28px 70px rgba(0,0,0,.5);opacity:0;
+  transition:opacity calc(.32s*var(--gd)) ease-in,transform calc(.32s*var(--gd)) ease-in,clip-path calc(.32s*var(--gd)) ease-in}
+.gp-pair{display:flex;gap:36px;align-items:flex-start}
+
+/* panel entrance / exit, one set per animation style */
+#gfx[data-style=slide] .gp{transform:translateY(54px)}
+#gfx[data-style=pop] .gp{transform:scale(.88)}
+#gfx[data-style=wipe] .gp{opacity:1;clip-path:inset(-90px 100% -90px -90px)}
+#gfx.on .gp{opacity:1;transform:none;
+  transition:opacity calc(.45s*var(--gd)) ease-out,transform calc(.5s*var(--gd)) cubic-bezier(.2,.8,.2,1),clip-path calc(.55s*var(--gd)) cubic-bezier(.65,0,.25,1)}
+#gfx[data-style=wipe].on .gp{clip-path:inset(-90px -90px -90px -90px)}
+#gfx[data-style=pop].on .gp{transition-timing-function:ease-out,cubic-bezier(.2,1.5,.4,1),ease}
+
+/* rows come in one by one after the panel */
+.arow{opacity:0;transition:opacity calc(.2s*var(--gd)) ease,transform calc(.2s*var(--gd)) ease,clip-path calc(.2s*var(--gd)) ease}
+#gfx[data-style=slide] .arow{transform:translateX(-48px)}
+#gfx[data-style=pop] .arow{transform:scale(.82)}
+#gfx[data-style=wipe] .arow{opacity:1;clip-path:inset(0 100% 0 0)}
+#gfx.on .arow{opacity:1;transform:none;
+  transition:opacity calc(.4s*var(--gd)) ease-out calc((.32s + var(--i)*.085s)*var(--gd)),
+             transform calc(.45s*var(--gd)) cubic-bezier(.2,.8,.2,1) calc((.32s + var(--i)*.085s)*var(--gd)),
+             clip-path calc(.45s*var(--gd)) cubic-bezier(.65,0,.25,1) calc((.32s + var(--i)*.085s)*var(--gd))}
+#gfx[data-style=wipe].on .arow{clip-path:inset(0 0 0 0)}
+
+/* shared header: logo block, title, small label */
+.gp-head{display:flex;align-items:center;gap:26px;height:112px;padding-right:34px;
+  background:linear-gradient(90deg,rgba(255,255,255,.08),rgba(255,255,255,.02));border-bottom:3px solid var(--tca)}
+.gp-logo{width:150px;height:112px;flex:none;display:flex;align-items:center;justify-content:center;background:linear-gradient(var(--tc),var(--tc2))}
+.gp-logo img{max-width:100px;max-height:86px;object-fit:contain;display:block}
+.gp-logo .mono{font-size:54px;line-height:1;color:var(--ttx)}
+.gp-logo.usn{background:linear-gradient(var(--u1),var(--u2))}
+.gp-logo.usn img{max-width:112px}
+.gp-title{display:flex;flex-direction:column;min-width:0}
+.gp-title b{font-size:58px;line-height:1;letter-spacing:.02em;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gp-title span{margin-top:8px;font:600 21px/1 var(--sans);letter-spacing:.24em;text-transform:uppercase;color:var(--tcl)}
+.gp-rec{margin-left:auto;font-size:46px;line-height:1;white-space:nowrap}
+.tlogo{width:60px;height:60px;flex:none;border-radius:50%;display:flex;align-items:center;justify-content:center;overflow:hidden;
+  background:linear-gradient(var(--lc,#3b4558),var(--lc2,#252d3b));box-shadow:inset 0 0 0 2px rgba(255,255,255,.16)}
+.tlogo img{max-width:74%;max-height:74%;object-fit:contain;display:block}
+.tlogo .mono{font-size:28px;line-height:1;color:var(--ltx,#fff)}
+.gbadge{display:inline-flex;align-items:center;justify-content:center;height:40px;padding:0 14px;border-radius:8px;font-size:25px;line-height:1;letter-spacing:.05em;white-space:nowrap}
+
+/* starting lineup */
+.gp-lineup{width:1560px}
+.gp-lineup.nocourt{width:1100px}
+.gp-lineup.narrow{width:846px}
+.gp-body{display:grid;grid-template-columns:minmax(0,1fr) 600px}
+.nocourt .gp-body,.narrow .gp-body{grid-template-columns:minmax(0,1fr)}
+.lu-rows{padding:12px 30px 16px;min-width:0}
+.lu-row{display:flex;align-items:center;gap:24px;height:106px;border-bottom:1px solid rgba(255,255,255,.08)}
+.lu-num{width:122px;height:84px;flex:none;border-radius:10px;display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(var(--tc),var(--tc2));color:var(--ttx);font-size:66px;line-height:1;font-variant-numeric:tabular-nums}
+.lu-num span{display:block;transform:scale(0);transition:transform calc(.15s*var(--gd)) ease}
+#gfx.on .lu-num span{transform:scale(1);transition:transform calc(.34s*var(--gd)) cubic-bezier(.2,1.7,.4,1) calc((.52s + var(--i)*.085s)*var(--gd))}
+.lu-main{flex:1;min-width:0}
+.lu-name{font-size:50px;line-height:1;letter-spacing:.02em;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.narrow .lu-name{font-size:44px}
+.lu-extra{margin-top:9px;font:600 22px/1 var(--sans);letter-spacing:.04em;color:#aab4c5;white-space:nowrap}
+.lu-extra i{font-style:normal;margin:0 10px;color:var(--tcl)}
+.lu-pos{flex:none;min-width:64px;height:50px;padding:0 12px;border-radius:8px;border:2px solid var(--tca);display:flex;align-items:center;justify-content:center;font-size:30px;line-height:1}
+.lu-bench{display:flex;flex-wrap:wrap;align-items:center;gap:8px 10px;padding-top:14px;font:600 21px/1 var(--sans)}
+.lu-bench b{margin-right:6px;font:700 24px/1 var(--font),'Arial Narrow',Impact,sans-serif;letter-spacing:.12em;color:var(--tcl)}
+.lu-bench span{display:inline-flex;align-items:center;gap:8px;padding:7px 12px 7px 7px;border-radius:8px;background:rgba(255,255,255,.07);white-space:nowrap}
+.lu-bench em{font-style:normal;min-width:34px;padding:4px 6px;border-radius:5px;text-align:center;background:var(--tc);color:var(--ttx)}
+.lu-court{position:relative;border-left:1px solid rgba(255,255,255,.08);background:radial-gradient(circle at 50% 100%,rgba(255,255,255,.08),rgba(255,255,255,0) 72%)}
+.lu-courtbox{position:absolute;left:50%;top:50%;width:560px;height:520px;transform:translate(-50%,-50%)}
+.lu-courtbox svg{position:absolute;left:0;top:0;width:100%;height:100%}
+.lu-slot{position:absolute;transform:translate(-50%,-50%)}
+.lu-tag{display:flex;align-items:stretch;white-space:nowrap;border-radius:8px;overflow:hidden;background:#0b0f18;box-shadow:0 6px 16px rgba(0,0,0,.45),0 0 0 1px rgba(255,255,255,.12)}
+.lu-tag b{min-width:52px;padding:8px 10px;text-align:center;font-size:30px;line-height:1;background:linear-gradient(var(--tc),var(--tc2));color:var(--ttx)}
+.lu-tag span{display:flex;align-items:center;padding:0 12px;font-size:26px;line-height:1;letter-spacing:.03em;text-transform:uppercase}
+
+/* schedule */
+.gp-sched{width:1320px}
+.sc-cols,.sc-row{display:grid;grid-template-columns:minmax(0,1fr) 250px 236px 120px;align-items:center;column-gap:20px;padding:0 34px}
+.sc-cols,.st-cols{height:46px;font:600 16px/1 var(--sans);letter-spacing:.2em;text-transform:uppercase;color:#8b96aa;border-bottom:1px solid rgba(255,255,255,.1)}
+.sc-row{height:88px;border-bottom:1px solid rgba(255,255,255,.07)}
+.sc-row:last-child,.st-row:last-child{border-bottom:0}
+.sc-match{display:flex;align-items:center;gap:16px;min-width:0}
+.sc-ha{width:50px;flex:none;text-align:center;font-size:26px;line-height:1;color:var(--tcl)}
+.sc-opp{font-size:42px;line-height:1;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sc-when b{display:block;font-size:36px;line-height:1;white-space:nowrap}
+.sc-when span{display:block;margin-top:6px;font:600 21px/1 var(--sans);color:#aab4c5;white-space:nowrap}
+.sc-empty{padding:40px 34px;font:600 26px/1.3 var(--sans);color:#aab4c5}
+
+/* standings */
+.gp-stand{width:1260px}
+.st-cols,.st-row{display:grid;grid-template-columns:76px minmax(0,1fr) 170px 170px 110px 120px;align-items:center;padding-right:30px;text-align:center}
+.st-row{height:74px;font-size:36px;line-height:1;border-bottom:1px solid rgba(255,255,255,.07);font-variant-numeric:tabular-nums}
+.st-rank{height:100%;display:flex;align-items:center;justify-content:center;font-size:34px;color:#8b96aa;background:rgba(255,255,255,.045)}
+.st-team{display:flex;align-items:center;gap:16px;min-width:0;padding-left:18px;text-align:left}
+.st-team .tlogo{width:52px;height:52px}
+.st-name{font-size:40px;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.st-strk.w{color:#5ee08a}
+.st-strk.l{color:#ff8a8a}
+.st-row.feat{background:linear-gradient(90deg,var(--tc),var(--tc2));color:var(--ttx)}
+.st-row.feat .st-rank{background:rgba(0,0,0,.22);color:inherit}
+.st-row.feat .st-strk{color:inherit}
+@keyframes featPulse{0%,100%{box-shadow:inset 0 0 0 0 rgba(255,255,255,0)}50%{box-shadow:inset 0 0 0 3px rgba(255,255,255,.7),inset 0 0 30px rgba(255,255,255,.25)}}
+#gfx.on .st-row.feat{animation:featPulse calc(.9s*var(--gd)) ease-in-out calc(var(--pd)*var(--gd)) 2}
+
+/* half-time report (full-screen graphic) */
+.gp-ht{width:1500px}
+.ht-top{display:grid;grid-template-columns:minmax(0,1fr) 270px minmax(0,1fr);height:118px}
+.ht-team{display:flex;align-items:center;gap:20px;min-width:0;padding:0 30px;background:linear-gradient(var(--c1),var(--c2));color:var(--tx)}
+.ht-team.r{flex-direction:row-reverse}
+.ht-team .tlogo{width:78px;height:78px}
+.ht-name{min-width:0;font-size:50px;line-height:1;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ht-score{display:flex;align-items:center;justify-content:center;gap:18px;font-size:86px;line-height:1;background:#0b0f18;font-variant-numeric:tabular-nums}
+.ht-score i{font-style:normal;font-size:40px;color:#8b96aa}
+.ht-rows{padding:10px 34px 8px}
+.ht-row{display:grid;grid-template-columns:230px minmax(0,1fr) 210px minmax(0,1fr) 230px;align-items:center;column-gap:18px;height:56px;border-bottom:1px solid rgba(255,255,255,.07)}
+.ht-row:last-child{border-bottom:0}
+.ht-v{font-size:36px;line-height:1;white-space:nowrap;font-variant-numeric:tabular-nums}
+.ht-v.r{text-align:right}
+.ht-v small{font:600 21px/1 var(--sans);color:#aab4c5;margin-left:10px}
+.ht-v.r small{margin:0 10px 0 0}
+.ht-lab{text-align:center;font:600 17px/1 var(--sans);letter-spacing:.2em;text-transform:uppercase;color:#aab4c5}
+.ht-bar{height:12px;border-radius:6px;background:rgba(255,255,255,.08);display:flex;overflow:hidden}
+.ht-bar.l{justify-content:flex-end}
+.ht-bar b{display:block;height:100%;border-radius:6px;background:var(--bc);transform:scaleX(0);transition:transform calc(.2s*var(--gd)) ease}
+.ht-bar.l b{transform-origin:right}
+.ht-bar.r b{transform-origin:left}
+#gfx.on .ht-bar b{transform:scaleX(1);transition:transform calc(.6s*var(--gd)) cubic-bezier(.2,.8,.2,1) calc((.5s + var(--i)*.085s)*var(--gd))}
+.ht-keys{display:flex;gap:16px;padding:14px 34px 22px;border-top:1px solid rgba(255,255,255,.1)}
+.ht-keys div{flex:1;min-width:0;display:flex;align-items:center;gap:14px;padding:14px 18px;border-radius:10px;background:rgba(255,255,255,.06);font:600 25px/1.25 var(--sans)}
+.ht-keys b{flex:none;font:700 22px/1 var(--font),'Arial Narrow',Impact,sans-serif;letter-spacing:.14em;color:var(--tcl)}
+
+/* ============================================================
+   CONTROL PANEL STYLES
+   ============================================================ */
+#panel{background:#14171c;color:#e8eaee;font-size:14px;line-height:1.35}
+#panel *{box-sizing:border-box}
+#panelToggle{position:fixed;left:10px;top:10px;z-index:20;opacity:.45}
+#panelToggle:hover{opacity:1}
+.tabs{position:sticky;top:0;z-index:3;display:flex;flex-wrap:wrap;gap:4px;padding:8px;background:#14171c;border-bottom:1px solid #2a2f39}
+.tab{flex:1 1 auto;min-height:34px;padding:0 10px;border:1px solid #2a2f39;border-radius:8px;background:#1c2028;color:#b9c0cc;font:600 13px/1 inherit;font-family:inherit;cursor:pointer}
+.tab.on{background:#2f6fed;border-color:#2f6fed;color:#fff}
+.pane{display:none;padding:12px}
+.pane.on{display:block}
+.card{background:#1c2028;border:1px solid #2a2f39;border-radius:10px;padding:12px;margin-bottom:12px}
+.card h3{margin:0 0 10px;font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:#aab1bd}
+.btn{min-height:38px;padding:0 10px;border:1px solid #39404d;border-radius:8px;background:#262b35;color:#fff;font:600 14px/1.1 inherit;font-family:inherit;cursor:pointer}
+.btn:hover{background:#303745}
+.btn:active{transform:translateY(1px)}
+.btn,.tab{touch-action:manipulation}
+.btn.primary{background:#2f6fed;border-color:#2f6fed}
+.btn.go{background:#1f9d55;border-color:#1f9d55;min-height:48px;font-size:16px}
+.btn.go.running{background:#d6453d;border-color:#d6453d}
+.btn.warn{background:#5a2a27;border-color:#7d3a35}
+.btn.on{background:#b98a00;border-color:#b98a00}
+.btn.sm{min-height:34px;min-width:38px}
+.g4 .btn,.g3 .btn{padding:0 2px;white-space:nowrap;min-width:0}
+.g4 kbd{margin-left:2px;padding:1px 3px;min-width:14px}
+kbd{display:inline-block;min-width:18px;padding:1px 5px;margin-left:4px;border:1px solid #4a5261;border-bottom-width:2px;border-radius:5px;
+  background:#0f1216;color:#cfd5df;font:600 11px/1.3 ui-monospace,Menlo,Consolas,monospace;text-align:center}
+.grid{display:grid;gap:8px;margin-top:8px}
+.g2{grid-template-columns:repeat(2,minmax(0,1fr))}.g3{grid-template-columns:repeat(3,minmax(0,1fr))}.g4{grid-template-columns:repeat(4,minmax(0,1fr))}
+.f{display:flex;flex-direction:column;gap:4px;font-size:12px;color:#aab1bd;min-width:0}
+#panel input,#panel select{height:34px;min-width:0;width:100%;padding:0 8px;border:1px solid #39404d;border-radius:6px;background:#0f1216;color:#fff;font:inherit}
+#panel input[type=color]{padding:2px}
+#panel input[type=range]{padding:0}
+#panel input[type=checkbox]{width:18px;height:18px;flex:none}
+#panel input[type=file]{height:auto;padding:6px;font-size:12px}
+.chk{display:flex;align-items:center;gap:8px;margin-top:8px;color:#e8eaee;font-size:14px}
+.big{font:700 46px/1 ui-monospace,Menlo,Consolas,monospace;margin:2px 0 8px}
+.lbl{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:#aab1bd}
+.inline{display:flex;gap:8px;margin-top:8px}
+.inline > *{flex:1}
+.teams2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.tcard{padding:0;overflow:hidden;margin-bottom:12px}
+.tcard .body{padding:10px}
+.thead{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 10px;font-weight:700}
+.thead .side{font-size:11px;letter-spacing:.08em;opacity:.8}
+#panel input.bigin{height:60px;font:700 40px/1 ui-monospace,Menlo,Consolas,monospace;text-align:center}
+.stat{display:grid;grid-template-columns:1fr 38px 54px 38px;gap:6px;align-items:center;margin-top:8px;font-size:13px;color:#aab1bd}
+.stat input{text-align:center}
+.note{font-size:12.5px;color:#aab1bd;margin:8px 0 0}
+.keys{width:100%;border-collapse:collapse;font-size:13px}
+.keys td{padding:5px 4px;border-bottom:1px solid #2a2f39}
+.keys td:first-child{white-space:nowrap;width:1%}
+.url{display:block;margin:6px 0;padding:8px;border-radius:6px;background:#0f1216;color:#9fd0ff;font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;word-break:break-all;user-select:all}
+.plist{display:flex;flex-direction:column;gap:6px;margin-top:10px}
+.lr{display:grid;grid-template-columns:40px minmax(0,1fr) 50px 46px 46px 46px 24px 34px;gap:4px;align-items:center;margin-top:4px}
+.lr-head{font-size:11px;color:#aab1bd}
+#panel .lr input,#panel .lr select,#panel .lg input,#panel .lg select{height:30px;padding:0 5px;font-size:13px}
+#panel .lr input[type=checkbox]{width:18px;height:18px}
+.lg{padding:8px 0;border-top:1px solid #2a2f39}
+.lg1{display:grid;grid-template-columns:64px minmax(0,1fr) 34px 34px 34px;gap:4px;align-items:center}
+.lg1.st{grid-template-columns:26px minmax(0,1fr) 34px 34px 34px}
+.lg1 .rk{font-weight:700;text-align:center;color:#aab1bd}
+.lg2{display:flex;gap:4px;margin-top:4px}
+.lg2 > *{flex:1;min-width:0}
+.lg .btn.sm,.lr .btn.sm{min-height:30px;min-width:0;padding:0}
+.btn.stb{min-height:50px;font-size:15px}
+.btn.mk{background:#1d6b42;border-color:#23925a}
+.btn.mk:hover{background:#238050}
+.stline{margin-top:10px;font:600 12.5px/1.55 ui-monospace,Menlo,Consolas,monospace;color:#cfd5df}
+.stline em{font-style:normal;color:#f0a8a3}
+.stposs{margin-top:8px;font-size:13px;line-height:1.5;color:#aab1bd}
+ol.tp{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:6px;font-size:14px;line-height:1.4}
+.posgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.pitem{display:grid;grid-template-columns:1fr auto auto;gap:6px;align-items:center}
+#toast{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:30;padding:10px 14px;border-radius:8px;background:#2f6fed;color:#fff;font:600 14px/1.2 system-ui,sans-serif;opacity:0;pointer-events:none;transition:opacity .2s}
+#toast.on{opacity:1}
+.netdot{margin-left:auto;align-self:center;padding:0 6px;font-size:12px;font-weight:600;white-space:nowrap;color:#f0a8a3}
+.netdot.ok{color:#7bd88f}
+#panel .net-ok{color:#7bd88f}
+#panel .net-bad{color:#f0a8a3}
+pre.url{white-space:pre-wrap;user-select:all;margin:6px 0}
+@media (max-width:520px){.teams2{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<!-- The scoreboard itself -->
+<div id="viewport">
+  <div id="stage">
+    <div id="bugwrap">
+      <div id="strip" class="above"><div id="stripInner"></div></div>
+      <div id="bug">
+        <div class="timecol">
+          <div class="clock" id="clockCell"><span id="clock"></span></div>
+          <div class="meta">
+            <span id="period">1ST</span>
+            <span class="shot" id="shotCell"><span id="shot"></span></span>
+          </div>
+        </div>
+        <div class="rows" id="rows"></div>
+      </div>
+    </div>
+    <!-- Countdown screen for when we're off air: pregame / halftime (section 13) -->
+    <div id="cdwrap">
+      <div id="cd" class="off">
+        <div class="cd-tag"><i></i><span>Halftime</span><i></i></div>
+        <div class="cd-teams" id="cdTeams"></div>
+        <div class="cd-bar" id="cdBar"><div class="cd-in" id="cdIn"><span class="cd-lab" id="cdLab"></span><span class="cd-time" id="cdTime"></span></div></div>
+      </div>
+    </div>
+    <!-- Full-screen graphics: lineups, schedule, standings (filled in by the script) -->
+    <div id="gfx"><div id="gfxPanel"></div></div>
+    <!-- Lower third: commentator / player names -->
+    <div id="lt">
+      <div class="ltbar ltL"><span class="lttxt"><span class="ltname" id="ltN1"></span></span></div>
+      <div class="ltlogo"><img id="ltImg" alt="USN"></div>
+      <div class="ltbar ltR"><span class="lttxt"><span class="ltname" id="ltN2"></span><span class="ltsub" id="ltSub"></span></span></div>
+    </div>
+  </div>
+</div>
+
+<!-- The control panel (filled in by the script) -->
+<aside id="panel"></aside>
+<button id="panelToggle" class="btn sm" title="Show or hide the control panel (F2)">Controls</button>
+<div id="toast"></div>
+
+<script>
+(function(){
+'use strict';
+
+/* ============================================================
+   1. DEFAULTS
+   Change these to change what a brand-new scoreboard starts with.
+   Everything here can also be changed in the control panel.
+   ============================================================ */
+var KEY  = 'usn_scoreboard_v1';          // saved state
+var PKEY = 'usn_scoreboard_presets_v1';  // saved presets
+var CHAN = 'usn_scoreboard';             // channel between windows
+var TEAMS = ['home','away'];
+/* The USN logo as a white shape (made from the club's logo file), used in the name graphic. */
+var USN_LOGO='data:image/png;base64,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';
+var SHADE = -0.38;                       // how much darker the score box is than the team colour
+var FONTS = {                            // name -> Google Fonts query (null = already on the computer)
+  'Barlow Condensed':'Barlow+Condensed:wght@600;700;800',
+  'Oswald':'Oswald:wght@500;600;700',
+  'Bebas Neue':'Bebas+Neue',
+  'Teko':'Teko:wght@500;600;700',
+  'Saira Condensed':'Saira+Condensed:wght@600;700;800',
+  'Impact':null
+};
+
+function defaults(){ return {
+  teams:{
+    home:{name:'UNIS',    abbr:'UNIS',record:'',color:'#1d4f91',color2:shade('#1d4f91',SHADE),logo:''},
+    away:{name:'Visitors',abbr:'VIS', record:'',color:'#a3262e',color2:shade('#a3262e',SHADE),logo:''}
+  },
+  rules:{periodMin:8,periods:4,otMin:4,shotOn:true,shotSec:35,shotShort:20,shotLinked:true,
+         timeouts:5,bonusAt:5,foulReset:true},
+  look:{pos:'bl',scale:1,margin:48,font:'Barlow Condensed',label:'abbr',showRecord:true,showStats:true,
+        homeTop:false,badge:true,gloss:true,radius:10,
+        clockBg:'#101216',clockTx:'#ffffff',metaBg:'#e9eaec',metaTx:'#15171b',accent:'#ffc629',low:'#ff3b30',
+        bg:'transparent',bgColor:'#1b6e3c'},
+  anim:{speed:1,intro:true,score:true,three:true,logo:true,shot:true,clockRed:true,buzzer:true,period:true,timeout:true,lower:true},
+  lower:{logoBg:'#4f9fe6',barBg:'#16181c',text:'#ffffff',scale:1,margin:56,hideBug:'overlap'},    // look of the name graphic
+  sound:{on:false,vol:0.6,score:true,buzzer:true,shot:true},
+  stats:{score:true,fouls:true,arrow:true,auto:true,keys:true}       // Stats tab: what a tap also changes, half-time report options
+};}
+
+function newGame(st){ return {
+  score:{home:0,away:0}, fouls:{home:0,away:0},
+  timeouts:{home:st.rules.timeouts,away:st.rules.timeouts},
+  period:1, final:false, possession:'', visible:true,
+  clock:{running:false,ms:st.rules.periodMin*60000,t0:0},   // ms = time left when the clock was last started/stopped
+  shot :{running:false,ms:st.rules.shotSec*1000,t0:0},      // t0 = now() when it was started
+  fx:{n:0,type:'',team:'',pts:0,at:0},                      // one-shot animation trigger
+  lt:{show:false,mode:'comm',n1:'',n2:'',name:'',sub:'',pos:'bc'},  // name graphic: mode 'comm' or 'player'; pos bl bc br tl tr
+  gfx:{show:''},                                            // full-screen graphic on air: '' | lineupHome | lineupAway | lineupBoth | schedule | standings | halftime
+  st:freshStats(),                                          // live stats (section 12)
+  cd:{show:false,mode:'pre',running:false,ms:900000,t0:0,set:900000,target:0}   // countdown screen (section 13): mode 'pre' | 'half'; target = clock time it counts to (0 = a plain length)
+};}
+
+/* ============================================================
+   2. SMALL HELPERS
+   ============================================================ */
+function $(s,root){ return (root||document).querySelector(s); }
+function $$(s,root){ return Array.prototype.slice.call((root||document).querySelectorAll(s)); }
+function clone(o){ return JSON.parse(JSON.stringify(o)); }
+function getPath(o,p){ return p.split('.').reduce(function(a,k){ return a==null?a:a[k]; },o); }
+function setPath(o,p,v){ var ks=p.split('.'), last=ks.pop(); ks.reduce(function(a,k){ return a[k]; },o)[last]=v; }
+function merge(base,over){            // deep-merge saved data onto defaults so new settings get a value
+  if(!over||typeof over!=='object') return base;
+  Object.keys(base).forEach(function(k){
+    if(over[k]===undefined) return;
+    if(base[k]&&typeof base[k]==='object'&&!Array.isArray(base[k])) base[k]=merge(base[k],over[k]);
+    else base[k]=over[k];
+  });
+  return base;
+}
+function hexRgb(h){ h=String(h||'#000').replace('#',''); if(h.length===3) h=h.replace(/(.)/g,'$1$1');
+  var n=parseInt(h,16)||0; return [(n>>16)&255,(n>>8)&255,n&255]; }
+function shade(hex,amt){               // amt -1..1 : negative = darker, positive = lighter
+  var c=hexRgb(hex), t=amt<0?0:255, a=Math.abs(amt);
+  return '#'+c.map(function(v){ return ('0'+Math.round(v+(t-v)*a).toString(16)).slice(-2); }).join('');
+}
+function contrast(hex){                // readable text colour on top of a background
+  var c=hexRgb(hex).map(function(v){ v/=255; return v<=0.03928?v/12.92:Math.pow((v+0.055)/1.055,2.4); });
+  return (0.2126*c[0]+0.7152*c[1]+0.0722*c[2])>0.45?'#111111':'#ffffff';
+}
+function retrigger(el,cls){ el.classList.remove(cls); void el.offsetWidth; el.classList.add(cls); }
+function other(t){ return t==='home'?'away':'home'; }
+
+/* ============================================================
+   3. MODE + STATE
+   ============================================================ */
+var qs = new URLSearchParams(location.search);
+var mode = qs.get('view');
+if(qs.has('output')) mode='overlay';                 // ...html?output  =  graphics only, no control panel
+if(['overlay','control','combined'].indexOf(mode)<0) mode = window.obsstudio ? 'overlay' : 'combined';
+var isAuthority = mode!=='overlay';     // pages with a control panel may change the game
+var playsSound  = mode!=='control';     // sounds come from the page that shows the scoreboard
+document.body.classList.add('mode-'+mode);
+
+var S = load();                          // S = {stamp, gs, ss, settings, game}   gs / ss = stamp of the last game / settings change
+function load(){
+  var st=defaults(), saved=null;
+  try{ saved=JSON.parse(localStorage.getItem(KEY)); }catch(e){}
+  if(saved&&saved.settings) merge(st,saved.settings);
+  var g=newGame(st);
+  if(saved&&saved.game) merge(g,saved.game);
+  var s0=(saved&&saved.stamp)||'0';
+  return {stamp:s0, gs:(saved&&saved.gs)||s0, ss:(saved&&saved.ss)||s0, settings:st, game:g};
+}
+
+/* One shared clock. now() is this device's time plus a correction measured against the relay
+   server, so a phone and a laptop agree on the moment the game clock was started. */
+var OKEY='usn_scoreboard_offset_v1', timeOffset=0;
+try{ timeOffset=parseInt(localStorage.getItem(OKEY),10)||0; }catch(e){}
+function now(){ return Date.now()+timeOffset; }
+function stamp(){ return now()+':'+Math.random().toString(36).slice(2,7); }
+function stampTime(s){ return parseInt(s,10)||0; }
+var settingsJSON=JSON.stringify(S.settings);   // to notice when the (large) settings really changed
+var mine=[];                                   // stamps of changes made in this window
+
+/* ---- talking to the other windows on this computer ---- */
+var bc=null; try{ bc=new BroadcastChannel(CHAN); }catch(e){}
+function saveLocal(){
+  try{ localStorage.setItem(KEY,JSON.stringify(S)); }
+  catch(e){ toast('Could not save (storage full). Try smaller logos.'); }
+}
+function bcState(){ if(bc) bc.postMessage({type:'state',S:S}); }
+function publish(){ saveLocal(); bcState(); }
+function incoming(next){
+  if(!next||!next.settings||!next.game||next.stamp===S.stamp) return;
+  if(relay.cfg&&relay.ok&&relay.cache) return;        // connected to a remote room: the room is the single source of truth
+  var old=S;
+  S={stamp:next.stamp,gs:next.gs||next.stamp,ss:next.ss||next.stamp,
+     settings:merge(defaults(),next.settings),game:merge(newGame(defaults()),next.game)};
+  settingsJSON=JSON.stringify(S.settings);
+  render(old.game);
+}
+if(bc) bc.onmessage=function(e){
+  var m=e.data||{};
+  if(m.type==='state') incoming(m.S);
+  else if(m.type==='hello'&&isAuthority){ bcState(); bcRelay(); bc.postMessage({type:'lib',LIB:LIB,LOGOS:LOGOS}); }   // a display just opened: send it everything
+  else if(m.type==='ping'&&!isAuthority&&m.stamp!==S.stamp) bc.postMessage({type:'hello'});
+  else if(m.type==='relay'&&!isAuthority) adoptRelay(m);
+  else if(m.type==='lib'){ if(!(relay.cfg&&relay.ok&&relay.cache)) adoptLib(m.LIB,m.LOGOS); }   // team library changed
+};
+window.addEventListener('storage',function(e){        // fallback when BroadcastChannel is not available
+  if(e.key===KEY&&e.newValue){ try{ incoming(JSON.parse(e.newValue)); }catch(_){} }
+});
+if(bc&&!isAuthority) bc.postMessage({type:'hello'});
+if(bc&&isAuthority) setInterval(function(){ bc.postMessage({type:'ping',stamp:S.stamp}); },2000);
+
+/* ---- every change to the game or settings goes through commit() ---- */
+function commit(fn){
+  var oldGame=clone(S.game);
+  fn(S.settings,S.game);
+  S.stamp=S.gs=stamp();
+  var sj=JSON.stringify(S.settings), changed=sj!==settingsJSON;
+  if(changed){ settingsJSON=sj; S.ss=S.stamp; mine.push(S.ss); if(mine.length>40) mine.shift(); }
+  publish();
+  if(relay.cfg){ queueGame(oldGame); if(changed){ relay.mySettings=S.ss; sendSettings(); } }
+  render(oldGame);
+}
+
+/* ============================================================
+   3b. REMOTE CONTROL (internet relay)
+   Optional. When it is on, the game and the settings are also
+   written to a Firebase Realtime Database "room", and every
+   device in that room listens for changes. Nothing here runs
+   until a database address and room code are entered in the
+   Remote tab (or arrive in the link: ?db=...&room=...).
+     <db>/usn/<room>/game      one flat list of fields ("score-home": 12, ...). Each change sends
+                               only the fields it touched, so two devices can work at once.
+     <db>/usn/<room>/settings  large (logos), sent whole and only when it changes
+     <db>/usn/<room>/lib       the team library (rosters, schedules, standings), sent whole when it changes
+     <db>/usn/<room>/logos     the library teams' logos, sent only when a logo changes
+   ============================================================ */
+var RKEY='usn_scoreboard_relay_v1';
+var clientId=Math.random().toString(36).slice(2,10);
+var relay={cfg:null,es:null,ok:false,err:'',fails:0,mySettings:'',retry:0,
+           cache:null,      // copy of the room's game fields as the server has them
+           pending:[],      // my changes the server has not confirmed yet
+           busy:false};
+
+function cleanDb(v){
+  v=String(v||'').trim(); if(!v) return '';
+  if(!/^https?:\/\//i.test(v)) v='https://'+v;
+  try{ var u=new URL(v), local=(u.hostname==='localhost'||u.hostname==='127.0.0.1');
+       if(u.protocol!=='https:'&&!local) return ''; return u.origin; }catch(e){ return ''; }
+}
+function cleanRoom(v){ v=String(v||'').trim().replace(/[^A-Za-z0-9_-]/g,''); return v.length>=4?v.slice(0,40):''; }
+function randomRoom(){
+  var c='ABCDEFGHJKLMNPQRSTUVWXYZ23456789', out='', a=new Uint8Array(10);
+  if(window.crypto&&crypto.getRandomValues) crypto.getRandomValues(a); else for(var j=0;j<a.length;j++) a[j]=Math.floor(Math.random()*256);
+  for(var i=0;i<a.length;i++) out+=c.charAt(a[i]%c.length);
+  return out;
+}
+function roomUrl(path){ return relay.cfg.db+'/usn/'+relay.cfg.room+(path||'')+'.json'; }
+function parseNode(v){ if(typeof v!=='string') return null; try{ return JSON.parse(v); }catch(e){ return null; } }
+
+function setRelay(cfg,quiet){            // turn remote control on (cfg) or off (null)
+  relay.cfg=cfg;
+  if(isAuthority){ try{ if(cfg) localStorage.setItem(RKEY,JSON.stringify(cfg)); else localStorage.removeItem(RKEY); }catch(e){} }
+  if(!quiet) bcRelay();
+  relayStop(); if(cfg) relayStart();
+  syncRemote(); relayStatus();
+}
+function bcRelay(){ if(bc&&isAuthority) bc.postMessage({type:'relay',cfg:relay.cfg,offset:timeOffset}); }
+function adoptRelay(m){                  // an overlay on this computer keeps following the control panel directly;
+  if(relay.cfg) return;                  // it only copies the panel's time correction so both clocks agree
+  if(typeof m.offset==='number'&&m.offset!==timeOffset){ timeOffset=m.offset; lastClockText=null; }
+}
+function relayStop(){
+  if(relay.es){ relay.es.close(); relay.es=null; }
+  clearTimeout(relay.retry); relay.ok=false; relay.err=''; relay.fails=0; relay.cache=null; relay.pending=[];
+}
+function relayStart(){
+  if(!relay.cfg) return;
+  if(!window.EventSource){ relay.err='This browser cannot use remote control.'; return; }
+  var es=relay.es=new EventSource(roomUrl(''));
+  es.onopen=function(){ relay.ok=true; relay.err=''; relayStatus(); measureOffset(); };
+  es.onerror=function(){
+    relay.ok=false;
+    if(es.readyState===2){             // refused (wrong address or rules): try again in a while
+      relay.err='Could not connect. Check the database address and its rules.';
+      clearTimeout(relay.retry);
+      relay.retry=setTimeout(function(){ if(relay.es===es){ es.close(); relay.es=null; relayStart(); relayStatus(); } },15000);
+    } else relay.err='Connection lost. Trying again…';
+    relayStatus();
+  };
+  es.addEventListener('put',function(e){
+    var d; try{ d=JSON.parse(e.data); }catch(_){ return; }
+    if(!d) return;
+    if(d.path==='/') onRoom(d.data||{});                               // sent each time we (re)connect: the whole room
+    else if(d.path==='/settings') applyRemote(parseNode(d.data));
+    else if(d.path==='/lib') applyRemoteLib('lib',parseNode(d.data));
+    else if(d.path==='/logos') applyRemoteLib('logos',parseNode(d.data));
+    else if(d.path==='/game'){ relay.cache=(d.data&&typeof d.data==='object')?d.data:{}; confirmed(relay.cache.stamp); rebuild(); }
+    else if(d.path.indexOf('/game/')===0&&relay.cache){ relay.cache[d.path.slice(6)]=d.data; rebuild(); }
+  });
+  es.addEventListener('patch',function(e){                             // some fields of the game changed
+    var d; try{ d=JSON.parse(e.data); }catch(_){ return; }
+    if(!d||d.path!=='/game'||!d.data||!relay.cache) return;
+    Object.keys(d.data).forEach(function(k){ relay.cache[k]=d.data[k]; });
+    confirmed(d.data.stamp); rebuild();
+  });
+  es.addEventListener('cancel',function(){ relay.ok=false; relay.err='The database refused the connection. Check its rules.'; relayStatus(); });
+}
+function onRoom(data){
+  /* The computer where "Connect" was clicked is the host. If its copy is newer than the room's
+     (or the room is empty) it fills the room; otherwise everyone takes what is in the room. */
+  var host=isAuthority&&relay.cfg&&relay.cfg.host;
+  var rs=parseNode(data.settings);
+  if(rs&&rs.stamp){ if(host&&stampTime(S.ss)>stampTime(rs.stamp)) sendSettings(); else applyRemote(rs); }
+  else if(host) sendSettings();
+  [['lib',LIB.stamp,sendLib],['logos',LOGOS.stamp,sendLogos]].forEach(function(k){        // team library and its logos, same rule
+    var r=parseNode(data[k[0]]);
+    if(r&&r.stamp){ if(host&&stampTime(k[1])>stampTime(r.stamp)) k[2](); else applyRemoteLib(k[0],r); }
+    else if(host) k[2]();
+  });
+  var rg=(data.game&&typeof data.game==='object')?data.game:null;
+  relay.cache=rg||{};
+  if(host&&(!rg||!rg.stamp||stampTime(S.gs)>stampTime(rg.stamp))){ relay.pending=[]; putGame(); }
+  else{ relay.pending=relay.pending.filter(function(p){ return !p.sent; }); rebuild(); pump(); }   // what was sent is already in the room
+}
+function applyRemote(o){                 // settings arrive whole
+  if(!o||!o.stamp||!o.settings) return;
+  if(o.stamp===S.ss) return;                                           // already have it
+  if(mine.indexOf(o.stamp)>=0&&o.stamp!==relay.mySettings) return;     // an echo of my own older change
+  S.settings=merge(defaults(),o.settings); S.ss=o.stamp; settingsJSON=JSON.stringify(S.settings);
+  S.stamp=stamp();
+  if(isAuthority){ saveLocal(); bcState(); }
+  render(S.game);
+}
+
+/* ---- the game travels as a flat list of fields ---- */
+function flatten(o,pre,out){             // {score:{home:2}} -> {"score-home":2}   ('' travels as '~')
+  out=out||{};
+  Object.keys(o).forEach(function(k){ var v=o[k], key=pre?pre+'-'+k:k;
+    if(v&&typeof v==='object') flatten(v,key,out); else out[key]=(v==='')?'~':v; });
+  return out;
+}
+function unflatten(f){
+  var o={};
+  Object.keys(f).forEach(function(key){
+    if(key==='stamp') return;
+    var ks=key.split('-'), n=o, v=f[key];
+    for(var i=0;i<ks.length-1;i++){ if(!n[ks[i]]||typeof n[ks[i]]!=='object') n[ks[i]]={}; n=n[ks[i]]; }
+    n[ks[ks.length-1]]=(v==='~')?'':v;
+  });
+  return o;
+}
+function queueGame(oldGame){             // work out which fields this change touched and send just those
+  var a=flatten(oldGame), b=flatten(S.game), patch={}, n=0;
+  Object.keys(b).forEach(function(k){ if(a[k]!==b[k]){ patch[k]=b[k]; n++; } });
+  if(!n) return;
+  patch.stamp=S.gs;
+  relay.pending.push({stamp:S.gs,patch:patch,sent:0});
+  pump();
+}
+function pump(){                         // one request at a time; changes made meanwhile go out together in the next one
+  var R=relay; if(R.busy||!R.cfg) return;
+  var todo=R.pending.filter(function(p){ return !p.sent; }); if(!todo.length) return;
+  var body={}; todo.forEach(function(p){ Object.keys(p.patch).forEach(function(k){ body[k]=p.patch[k]; }); });
+  R.busy=true;
+  fetch(roomUrl('/game'),{method:'PATCH',body:JSON.stringify(body)})
+    .then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); R.fails=0; var t=Date.now(); todo.forEach(function(p){ p.sent=t; }); })
+    .catch(function(){ R.fails++; })
+    .then(function(){ R.busy=false; relayStatus(); if(R.cfg) setTimeout(pump,R.fails?2000:0); });
+}
+function putGame(){                      // replace the room's whole game with mine (host only, when connecting)
+  if(!relay.cfg) return;
+  var body=flatten(S.game); body.stamp=S.gs;
+  fetch(roomUrl('/game'),{method:'PUT',body:JSON.stringify(body)})
+    .then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); relay.fails=0; })
+    .catch(function(){ relay.fails++; setTimeout(function(){ if(relay.cfg&&relay.ok) putGame(); },2000); })
+    .then(relayStatus);
+}
+function confirmed(st){                    // the server has echoed one of my changes: it and everything before it is done
+  var P=relay.pending, i, t=Date.now();
+  for(i=P.length-1;i>=0;i--) if(P[i].stamp===st){ P.splice(0,i+1); break; }
+  relay.pending=relay.pending.filter(function(p){ return !p.sent||t-p.sent<8000; });   // never wait forever for an echo
+}
+function rebuild(){                      // what to show = the server's copy + my changes it has not confirmed yet
+  var R=relay; if(!R.cache) return;
+  var view={};
+  Object.keys(R.cache).forEach(function(k){ view[k]=R.cache[k]; });
+  R.pending.forEach(function(p){ Object.keys(p.patch).forEach(function(k){ view[k]=p.patch[k]; }); });
+  if(!view.stamp) return;
+  var g=merge(newGame(defaults()),unflatten(view));
+  if(JSON.stringify(g)===JSON.stringify(S.game)){ S.gs=view.stamp; return; }
+  var old=S.game; S.game=g; S.gs=view.stamp; S.stamp=stamp();
+  if(isAuthority){ saveLocal(); bcState(); }
+  render(old);
+}
+function makeSender(node,build){         // one request at a time, always sending the latest copy
+  var busy=false, dirty=false;
+  function go(){
+    if(!relay.cfg) return;
+    if(busy){ dirty=true; return; }
+    busy=true; dirty=false;
+    fetch(roomUrl('/'+node),{method:'PUT',body:JSON.stringify(JSON.stringify(build()))})
+      .then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); relay.fails=0; })
+      .catch(function(){ relay.fails++; dirty=true; })
+      .then(function(){ busy=false; relayStatus(); if(dirty&&relay.cfg) setTimeout(go,relay.fails?2000:0); });
+  }
+  return go;
+}
+var sendSettings=makeSender('settings',function(){ return {stamp:S.ss,settings:S.settings}; });
+
+function measureOffset(){                // ask the server what time it is, four times, and keep the quickest answer
+  if(!relay.cfg) return;
+  var best=null, n=0, url=roomUrl('/time/'+clientId);
+  (function ping(){
+    if(!relay.cfg) return;
+    var a=Date.now(), b=0;
+    fetch(url,{method:'PUT',body:'{".sv":"timestamp"}'})
+      .then(function(r){ b=Date.now(); return r.json(); })
+      .then(function(v){ return (typeof v==='number')?v:fetch(url).then(function(r){ return r.json(); }); })
+      .then(function(ts){ if(typeof ts==='number'&&(!best||b-a<best.rtt)) best={rtt:b-a,off:ts-(a+b)/2}; })
+      .catch(function(){})
+      .then(function(){
+        if(++n<4){ setTimeout(ping,250); return; }
+        if(!best) return;
+        var o=Math.round(best.off);
+        if(Math.abs(o-timeOffset)>30){ timeOffset=o; try{ localStorage.setItem(OKEY,String(o)); }catch(e){} lastClockText=null; }
+        bcRelay();
+      });
+  })();
+}
+setInterval(function(){ if(relay.cfg&&relay.ok) measureOffset(); },600000);
+
+function shareLink(){
+  var c=relay.cfg; if(!c) return '';
+  var base=(c.page||'').trim()||(/^http/.test(location.protocol)?location.origin+location.pathname:'');
+  if(!base) return '';
+  base=base.split('?')[0].split('#')[0];
+  return base+'?view=control&db='+encodeURIComponent(c.db)+'&room='+encodeURIComponent(c.room);
+}
+function relayStatus(){
+  var o=panelOut; if(!o||!o.netText) return;
+  var c=relay.cfg, text, cls='off';
+  if(!c) text='Remote control is off. Only this computer can run the scoreboard.';
+  else if(relay.ok&&!relay.fails){ text='Connected to room '+c.room+'.'; cls='ok'; }
+  else if(relay.ok){ text='Connected, but the last change has not gone through yet. Trying again…'; cls='bad'; }
+  else { text=relay.err||'Connecting…'; cls='bad'; }
+  o.netText.textContent=text; o.netText.className='note net-'+cls;
+  o.netDot.hidden=!c; o.netDot.className='netdot '+cls; o.netDot.textContent=(cls==='ok')?'● Remote on':'● Remote: not connected';
+  o.shareLink.textContent=shareLink()||(c?'Fill in "Web address of the hosted page", then press Connect again.':'Connect first.');
+}
+function syncRemote(){
+  if(!isAuthority||!$('#rDb')) return;
+  var c=relay.cfg||{}, f=document.activeElement;
+  [['#rDb',c.db],['#rRoom',c.room],['#rPage',c.page]].forEach(function(x){ var n=$(x[0]); if(n!==f&&x[1]!==undefined) n.value=x[1]||''; });
+  if(!$('#rRoom').value) $('#rRoom').value=randomRoom();
+}
+function relayInit(){
+  var cfg=null, db=cleanDb(qs.get('db')), room=cleanRoom(qs.get('room'));
+  if(db&&room) cfg={db:db,room:room,page:/^http/.test(location.protocol)?location.origin+location.pathname:'',host:false};   // opened from a shared link
+  else if(isAuthority){ try{ cfg=JSON.parse(localStorage.getItem(RKEY)); }catch(e){} if(cfg&&(!cleanDb(cfg.db)||!cleanRoom(cfg.room))) cfg=null; }
+  if(cfg) setRelay(cfg); else { syncRemote(); relayStatus(); }
+}
+
+/* ============================================================
+   4. CLOCK MATHS
+   A running clock stores the time left when it started plus the
+   moment it started. Time left is always worked out from the
+   real clock, so it cannot drift.
+   ============================================================ */
+function rem(c){ return c.running ? Math.max(0,c.ms-(now()-c.t0)) : c.ms; }
+function freeze(c){ c.ms=rem(c); c.running=false; }
+function run(c){ if(c.ms>0){ c.t0=now(); c.running=true; } }
+function periodLen(rules,p){ return (p<=rules.periods?rules.periodMin:rules.otMin)*60000; }
+function fmtClock(ms){
+  if(ms>59900){ var s=Math.ceil(ms/1000); return Math.floor(s/60)+':'+('0'+(s%60)).slice(-2); }
+  return (Math.ceil(ms/100)/10).toFixed(1);                 // tenths under a minute
+}
+function parseClock(txt){              // "8:00", "45", "45.3"  ->  milliseconds (or null)
+  txt=String(txt).trim(); if(!txt) return null;
+  var m=txt.match(/^(\d+):(\d{1,2})(\.\d)?$/), v;
+  if(m) v=(+m[1])*60000+(+m[2])*1000+(m[3]?(+m[3])*1000:0);
+  else if(/^\d+(\.\d+)?$/.test(txt)) v=parseFloat(txt)*1000;
+  else return null;
+  return Math.max(0,Math.round(v));
+}
+var ORD=['1ST','2ND','3RD','4TH','5TH','6TH','7TH','8TH'];
+function periodLabel(p){
+  var n=S.settings.rules.periods;
+  if(p<=n) return ORD[p-1]||(p+'TH');
+  return (p-n===1)?'OT':(p-n)+'OT';
+}
+function unitName(){ var n=S.settings.rules.periods; return n===4?'QUARTER':n===2?'HALF':'PERIOD'; }
+function endText(){                    // banner when the game clock hits zero
+  var p=S.game.period, n=S.settings.rules.periods;
+  if(p<n) return (n%2===0&&p===n/2)?'HALFTIME':'END OF '+periodLabel(p)+' '+unitName();
+  if(p===n) return 'END OF REGULATION';
+  return 'END OF '+periodLabel(p);
+}
+function startText(){                  // banner when a new period starts
+  var p=S.game.period, n=S.settings.rules.periods;
+  if(p<=n) return periodLabel(p)+' '+unitName();
+  return (p-n===1)?'OVERTIME':ORD[p-n-1]+' OVERTIME';
+}
+
+/* ============================================================
+   5. ACTIONS  (what the buttons and keys do)
+   ============================================================ */
+function fx(g,type,team,pts){ g.fx={n:g.fx.n+1,type:type,team:team||'',pts:pts||0,at:now()}; }
+var ACT = {
+  score:function(t,n){ n=+n; commit(function(st,g){
+    var before=g.score[t]; g.score[t]=Math.max(0,before+n);
+    if(n>0) fx(g,'score',t,n);
+  });},
+  foul:function(t,n){ commit(function(st,g){ g.fouls[t]=Math.max(0,g.fouls[t]+(+n)); }); },
+  timeoutAdd:function(t,n){ commit(function(st,g){ g.timeouts[t]=Math.max(0,g.timeouts[t]+(+n)); }); },
+  timeout:function(t){ commit(function(st,g){                 // call a timeout: use one, stop the clocks, show the banner
+    if(g.timeouts[t]>0) g.timeouts[t]--;
+    freeze(g.clock); freeze(g.shot); fx(g,'timeout',t);
+  });},
+  poss:function(t){ commit(function(st,g){ g.possession=(g.possession===t)?'':t; }); },
+  possSwitch:function(){ commit(function(st,g){ g.possession=(g.possession==='home')?'away':'home'; }); },
+  clockToggle:function(){ commit(function(st,g){
+    if(g.clock.running){ freeze(g.clock); freeze(g.shot); }
+    else{ freeze(g.clock); if(g.clock.ms<=0) return; run(g.clock);
+          if(st.rules.shotOn&&st.rules.shotLinked){ freeze(g.shot); run(g.shot); } }
+  });},
+  clockNudge:function(s){ commit(function(st,g){ setClock(g.clock,rem(g.clock)+(+s)*1000); }); },
+  clockSet:function(){ var el=$('#setClock'), v=parseClock(el.value);
+    if(v==null){ toast('Type a time like 8:00 or 45.3'); return; }
+    commit(function(st,g){ setClock(g.clock,v); }); el.value=''; },
+  clockFull:function(){ commit(function(st,g){ freeze(g.shot); g.clock={running:false,ms:periodLen(st.rules,g.period),t0:0}; }); },
+  shotToggle:function(){ commit(function(st,g){ if(g.shot.running) freeze(g.shot); else{ freeze(g.shot); run(g.shot); } }); },
+  shotReset:function(which){ commit(function(st,g){           // full or short reset; keeps running if the game clock is running
+    g.shot.ms=(which==='short'?st.rules.shotShort:st.rules.shotSec)*1000; g.shot.running=false;
+    if(g.clock.running&&st.rules.shotLinked) run(g.shot);
+  });},
+  shotNudge:function(s){ commit(function(st,g){ setClock(g.shot,rem(g.shot)+(+s)*1000); }); },
+  shotSet:function(){ var el=$('#setShot'), v=parseClock(el.value);
+    if(v==null){ toast('Type seconds, like 14'); return; }
+    commit(function(st,g){ setClock(g.shot,v); }); el.value=''; },
+  nextPeriod:function(){ commit(function(st,g){
+    var wasLast=g.period>=st.rules.periods;
+    g.period++; g.final=false;
+    g.clock={running:false,ms:periodLen(st.rules,g.period),t0:0};
+    g.shot ={running:false,ms:st.rules.shotSec*1000,t0:0};
+    if(st.rules.foulReset&&!wasLast){ g.fouls.home=0; g.fouls.away=0; }   // fouls carry into overtime
+    fx(g,'period');
+  });},
+  prevPeriod:function(){ commit(function(st,g){ if(g.period>1) g.period--; g.final=false; }); },
+  final:function(){ commit(function(st,g){ g.final=!g.final; if(g.final){ freeze(g.clock); freeze(g.shot); fx(g,'final'); } }); },
+  visible:function(){ commit(function(st,g){ g.visible=!g.visible; }); },
+  intro:function(){ commit(function(st,g){ g.visible=true; fx(g,'intro'); }); },
+  horn:function(){ commit(function(st,g){ fx(g,'horn'); }); },
+  newGame:function(btn){ twoStep(btn,function(){ commit(function(st,g){
+    var n=newGame(st); n.fx=g.fx; n.visible=g.visible; n.lt=g.lt; n.gfx=g.gfx; n.cd=g.cd; S.game=n;
+  }); toast('New game started'); }); },
+  swapTeams:function(){ commit(function(st,g){
+    var a=st.teams.home; st.teams.home=st.teams.away; st.teams.away=a;
+    ['score','fouls','timeouts'].forEach(function(k){ var x=g[k].home; g[k].home=g[k].away; g[k].away=x; });
+    if(g.possession) g.possession=other(g.possession);
+  });},
+  lower:function(){                                            // show / hide the name graphic
+    if(!S.game.lt.show&&!lowerText().b){ toast('Type a name in the Names tab first'); return; }
+    commit(function(st,g){ g.lt.show=!g.lt.show; });
+  },
+  lowerMode:function(m){ commit(function(st,g){ g.lt.mode=(m==='comm'||m==='player')?m:(g.lt.mode==='player'?'comm':'player'); }); },
+  lowerPos:function(p){ commit(function(st,g){ g.lt.pos=p; }); },
+  autoShade:function(t){ commit(function(st){ st.teams[t].color2=shade(st.teams[t].color,SHADE); }); },
+  logoClear:function(t){ commit(function(st){ st.teams[t].logo=''; }); },
+  presetSave:function(){ var name=$('#presetName').value.trim(); if(!name){ toast('Give the preset a name'); return; }
+    var list=presets().filter(function(p){ return p.name!==name; });
+    list.push({name:name,settings:clone(S.settings)}); savePresets(list); $('#presetName').value=''; toast('Saved "'+name+'"'); },
+  presetLoad:function(i){ var p=presets()[+i]; if(!p) return;
+    commit(function(){ S.settings=merge(defaults(),clone(p.settings)); }); toast('Loaded "'+p.name+'"'); },
+  presetDelete:function(i){ var list=presets(); list.splice(+i,1); savePresets(list); },
+  exportAll:function(){ var blob=new Blob([JSON.stringify({settings:S.settings,presets:presets(),lib:LIB,logos:LOGOS},null,1)],{type:'application/json'});
+    var a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='usn-scoreboard-settings.json';
+    document.body.appendChild(a); a.click(); a.remove(); },
+  resetAll:function(btn){ twoStep(btn,function(){ commit(function(){ S.settings=defaults(); S.game=newGame(S.settings); }); toast('Back to defaults'); }); },
+  panel:function(){ document.body.classList.toggle('panel-hidden'); fit(); },
+  relayConnect:function(){
+    var db=cleanDb($('#rDb').value), room=cleanRoom($('#rRoom').value), page=$('#rPage').value.trim();
+    if(!db){ toast('Paste the database address first. It starts with https://'); return; }
+    if(!room){ toast('The room code needs 4 or more letters or numbers'); return; }
+    setRelay({db:db,room:room,page:page,host:true}); toast('Connecting…');
+  },
+  relayDisconnect:function(){ setRelay(null); toast('Remote control is off'); },
+  roomNew:function(){ $('#rRoom').value=randomRoom(); },
+  relayCopy:function(){
+    var link=shareLink(); if(!link){ toast('Connect first, with the hosted page address filled in'); return; }
+    var done=function(){ toast('Link copied'); }, fail=function(){ toast('Select the link and copy it by hand'); };
+    if(navigator.clipboard&&navigator.clipboard.writeText) navigator.clipboard.writeText(link).then(done,fail); else fail();
+  }
+};
+function setClock(c,ms){ ms=Math.max(0,ms); var was=c.running; c.ms=ms; c.running=false; if(was) run(c); }
+function act(spec,btn){ var p=String(spec).split(':'), f=ACT[p[0]]; if(f) f(p[1]!==undefined?p[1]:btn,p[2]); }
+function twoStep(btn,fn){              // destructive buttons need a second click within 3 seconds
+  if(!btn||!btn.dataset){ fn(); return; }
+  if(btn.dataset.armed){ delete btn.dataset.armed; btn.textContent=btn.dataset.label; fn(); return; }
+  btn.dataset.label=btn.textContent; btn.dataset.armed='1'; btn.textContent='Click again to confirm';
+  setTimeout(function(){ if(btn.dataset.armed){ delete btn.dataset.armed; btn.textContent=btn.dataset.label; } },3000);
+}
+
+/* ============================================================
+   6. KEYBOARD SHORTCUTS
+   Add or change keys here. The list in the Help tab is built
+   from this table, so it always matches.
+   ============================================================ */
+var KEYS = [
+  ['space','clockToggle','Start / stop the game clock (shot clock follows)'],
+  ['s','shotToggle','Start / stop the shot clock only'],
+  ['r','shotReset:full','Reset shot clock (full)'],
+  ['t','shotReset:short','Reset shot clock (short reset)'],
+  ['q','score:home:1','Home +1'],['w','score:home:2','Home +2'],['e','score:home:3','Home +3'],['a','score:home:-1','Home −1'],
+  ['z','foul:home:1','Home foul'],['x','timeout:home','Home timeout'],
+  ['u','score:away:1','Away +1'],['i','score:away:2','Away +2'],['o','score:away:3','Away +3'],['j','score:away:-1','Away −1'],
+  ['n','foul:away:1','Away foul'],['m','timeout:away','Away timeout'],
+  ['p','possSwitch','Switch the possession arrow'],
+  [']','nextPeriod','Next period'],['[','prevPeriod','Previous period (fix a mistake)'],
+  ['h','visible','Hide / show the scoreboard'],
+  ['b','horn','Sound the horn'],
+  ['l','lower','Show / hide the name graphic'],
+  ['k','lowerMode','Name graphic: switch between commentators and player'],
+  ['1','lowerPos:bl','Name graphic: bottom left'],['2','lowerPos:bc','Name graphic: bottom centre'],['3','lowerPos:br','Name graphic: bottom right'],
+  ['4','lowerPos:tl','Name graphic: top left'],['5','lowerPos:tr','Name graphic: top right'],
+  ['6','gfx:lineupHome','Full-screen graphic: home lineup'],['7','gfx:lineupAway','Full-screen graphic: away lineup'],['8','gfx:lineupBoth','Full-screen graphic: both lineups'],
+  ['9','gfx:schedule','Full-screen graphic: schedule'],['0','gfx:standings','Full-screen graphic: standings'],
+  ['g','gfx:halftime','Full-screen graphic: half-time report'],
+  ['c','cdShow','Show / hide the countdown screen'],['v','cdMode','Countdown screen: switch between pregame and halftime'],
+  ['F2','panel','Hide / show this panel (side-by-side view)']
+];
+document.addEventListener('keydown',function(e){
+  if(!isAuthority||e.ctrlKey||e.metaKey||e.altKey) return;
+  var t=e.target;
+  if(t&&t.matches&&t.matches('input,select,textarea')){            // typing in a box: keys are not shortcuts
+    if(e.key==='Enter'){ if(t.dataset.enter) act(t.dataset.enter); t.blur(); }
+    return;
+  }
+  var k=e.key===' '?'space':(e.key.length===1?e.key.toLowerCase():e.key);
+  for(var i=0;i<KEYS.length;i++) if(KEYS[i][0]===k){ e.preventDefault(); act(KEYS[i][1]); return; }
+});
+
+/* ============================================================
+   7. SOUND  (made with the Web Audio API, no files needed)
+   ============================================================ */
+var AC=null;
+function audio(){ if(!AC){ try{ AC=new (window.AudioContext||window.webkitAudioContext)(); }catch(e){ return null; } }
+  if(AC.state==='suspended') AC.resume(); return AC; }
+function tone(o){
+  var a=audio(); if(!a) return;
+  var t=a.currentTime+(o.t||0), osc=a.createOscillator(), g=a.createGain(), v=(o.g||0.2)*S.settings.sound.vol;
+  osc.type=o.type||'sine'; osc.frequency.setValueAtTime(o.f,t);
+  if(o.f2) osc.frequency.exponentialRampToValueAtTime(o.f2,t+o.d);
+  g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(v,t+0.01);
+  g.gain.setValueAtTime(v,t+o.d-0.04); g.gain.linearRampToValueAtTime(0,t+o.d);
+  osc.connect(g); g.connect(a.destination); osc.start(t); osc.stop(t+o.d+0.02);
+}
+var SFX = {
+  score:function(){ tone({f:660,f2:990,d:0.13,type:'triangle',g:0.25}); },
+  three:function(){ [523,659,784,1047].forEach(function(f,i){ tone({f:f,d:0.15,t:i*0.09,type:'triangle',g:0.25}); }); },
+  buzzer:function(){ tone({f:147,d:1.3,type:'sawtooth',g:0.16}); tone({f:196,d:1.3,type:'square',g:0.12}); },
+  shot:function(){ tone({f:330,d:0.7,type:'square',g:0.12}); tone({f:247,d:0.7,type:'sawtooth',g:0.12}); }
+};
+function sfx(name){
+  var so=S.settings.sound; if(!playsSound||!so.on) return;
+  var group=(name==='three')?'score':name; if(so[group]===false) return;
+  SFX[name]();
+}
+document.addEventListener('pointerdown',function(){ if(S.settings.sound.on) audio(); keepAwake(); });   // browsers need one click before sound
+var wakeLock=null;
+function keepAwake(){                    // stop a scorekeeper's phone from going to sleep mid-game
+  if(mode!=='control'||!relay.cfg||wakeLock||!navigator.wakeLock) return;
+  navigator.wakeLock.request('screen').then(function(w){ wakeLock=w; w.addEventListener('release',function(){ wakeLock=null; }); },function(){});
+}
+document.addEventListener('visibilitychange',function(){ if(document.visibilityState==='visible') keepAwake(); });
+
+/* ============================================================
+   8. BUILDING + DRAWING THE SCOREBOARD
+   ============================================================ */
+var el = { gfx:$('#gfx'), gfxPanel:$('#gfxPanel'), lt:$('#lt'), ltN1:$('#ltN1'), ltN2:$('#ltN2'), ltSub:$('#ltSub'),
+           viewport:$('#viewport'), stage:$('#stage'), wrap:$('#bugwrap'), bug:$('#bug'), strip:$('#strip'),
+           stripInner:$('#stripInner'), clockCell:$('#clockCell'), clock:$('#clock'), period:$('#period'),
+           shotCell:$('#shotCell'), shot:$('#shot'), rowsBox:$('#rows'), panel:$('#panel'), cdwrap:$('#cdwrap') };
+var rows = {};
+TEAMS.forEach(function(t){
+  var r=document.createElement('div'); r.className='row'; r.dataset.team=t;
+  r.innerHTML='<div class="bonus"><span>BONUS</span></div>'+
+    '<div class="teamcell"><div class="logo"><img alt=""><span class="mono"></span></div>'+
+    '<div class="names"><span class="abbr"></span><div class="sub"><span class="rec"></span><span class="tos"></span><span class="fls"></span></div></div>'+
+    '<i class="poss"></i><div class="sweep"><span>3-POINTER!</span></div></div>'+
+    '<div class="scorecell"><span class="score">0</span></div>';
+  rows[t]={row:r,teamcell:$('.teamcell',r),logo:$('.logo',r),img:$('img',r),mono:$('.mono',r),names:$('.names',r),
+           abbr:$('.abbr',r),rec:$('.rec',r),tos:$('.tos',r),fls:$('.fls',r),sweep:$('.sweep',r),
+           scorecell:$('.scorecell',r),score:$('.score',r)};
+});
+
+var loadedFont='';
+function setFont(name){
+  if(name===loadedFont) return; loadedFont=name;
+  document.documentElement.style.setProperty('--font',"'"+name+"'");
+  var q=FONTS[name]; if(!q) return;
+  var id='gf-'+name.replace(/\W/g,''); if(document.getElementById(id)) return;
+  var l=document.createElement('link'); l.id=id; l.rel='stylesheet';
+  l.href='https://fonts.googleapis.com/css2?family='+q+'&display=swap'; document.head.appendChild(l);
+  if(document.fonts&&document.fonts.load) document.fonts.load("700 40px '"+name+"'").then(fitNames,function(){});
+}
+function fitNames(){                    // squeeze long team names so they never overflow
+  TEAMS.forEach(function(t){ var r=rows[t]; r.abbr.style.transform='';
+    var avail=r.names.clientWidth, w=r.abbr.offsetWidth;
+    if(avail>0&&w>avail) r.abbr.style.transform='scaleX('+(avail/w)+')'; });
+  if(cdEl) cdFit();                      // the countdown screen's names too
+}
+
+function applySettings(){
+  var st=S.settings, L=st.look, root=document.documentElement.style;
+  root.setProperty('--d',String(1/Math.max(0.25,st.anim.speed)));
+  root.setProperty('--clock-bg',L.clockBg); root.setProperty('--clock-tx',L.clockTx);
+  root.setProperty('--meta-bg',L.metaBg);   root.setProperty('--meta-tx',L.metaTx);
+  root.setProperty('--accent',L.accent);    root.setProperty('--low',L.low);
+  root.setProperty('--radius',L.radius+'px');
+  setFont(L.font);
+  el.bug.classList.toggle('gloss',!!L.gloss);
+  el.bug.classList.toggle('noshot',!st.rules.shotOn);
+  TEAMS.forEach(function(t){
+    var T=st.teams[t], r=rows[t], s=r.row.style;
+    s.setProperty('--c1',T.color); s.setProperty('--c1d',shade(T.color,-0.2)); s.setProperty('--c2',T.color2);
+    s.setProperty('--tx',contrast(T.color)); s.setProperty('--tx2',contrast(T.color2));
+    r.abbr.textContent=(L.label==='name'?T.name:T.abbr)||'';
+    if(T.logo){ if(r.img.getAttribute('src')!==T.logo) r.img.src=T.logo; r.img.hidden=false; r.mono.hidden=true; }
+    else{ r.img.hidden=true; r.img.removeAttribute('src'); r.mono.hidden=false;
+          r.mono.textContent=((T.abbr||T.name||'?').trim().charAt(0)||'?').toUpperCase(); }
+    r.logo.classList.toggle('badge',!!L.badge||!T.logo);
+    r.rec.textContent=(L.showRecord&&T.record)?'('+T.record.replace(/^\(|\)$/g,'')+')':'';
+    r.row.classList.toggle('nostats',!L.showStats);
+  });
+  var first=L.homeTop?'home':'away';
+  if(el.rowsBox.firstChild!==rows[first].row){ el.rowsBox.appendChild(rows[first].row); el.rowsBox.appendChild(rows[other(first)].row); }
+  var transparent=L.bg!=='color';
+  el.viewport.style.background=transparent?'':L.bgColor;
+  el.viewport.classList.toggle('checker',transparent&&mode!=='overlay');
+  place(); fitNames();
+}
+
+function place(){                       // where the scorebug (and the countdown screen, same spot) sit on the 1920x1080 stage
+  var L=S.settings.look, v=L.pos.charAt(0), h=L.pos.charAt(1), m=L.margin+'px';
+  [el.wrap,el.cdwrap].forEach(function(w){
+    var s=w.style, tx='';
+    s.left=s.right=s.top=s.bottom='';
+    if(mode==='control'){ s.left='35px'; s.top='71px'; s.transform='none'; return; }
+    if(v==='t') s.top=m; else s.bottom=m;
+    if(h==='l') s.left=m; else if(h==='r') s.right=m; else { s.left='50%'; tx='translateX(-50%) '; }
+    s.transformOrigin=(h==='l'?'0':h==='r'?'100%':'50%')+' '+(v==='t'?'0':'100%');
+    s.transform=tx+'scale('+L.scale+')';
+  });
+  setStripSide(mode==='control'||v!=='t'?'above':'below');
+}
+function setStripSide(side){ el.strip.classList.remove('above','below'); el.strip.classList.add(side); }
+
+function fit(){                         // scale the stage to the window
+  var control=mode==='control', sw=control?800:1920, sh=control?410:1080, cw=el.viewport.clientWidth, k;
+  if(control){ k=Math.min(1,cw/sw); el.viewport.style.height=(sh*k)+'px';
+    el.stage.style.transform='translate('+((cw-sw*k)/2)+'px,0) scale('+k+')'; return; }
+  var ch=el.viewport.clientHeight; k=Math.min(cw/sw,ch/sh);
+  el.stage.style.transform='translate('+((cw-sw*k)/2)+'px,'+((ch-sh*k)/2)+'px) scale('+k+')';
+}
+window.addEventListener('resize',fit);
+
+function applyGame(oldGame){
+  var st=S.settings, g=S.game, A=st.anim;
+  var fresh=oldGame&&g.fx.n!==oldGame.fx.n&&(Math.abs(now()-g.fx.at)<4000) ? g.fx : null;   // an animation to play right now
+  TEAMS.forEach(function(t){
+    var r=rows[t];
+    if(fresh&&fresh.type==='score'&&fresh.team===t) fxScore(t,fresh.pts);
+    else r.score.textContent=g.score[t];
+    var total=Math.max(st.rules.timeouts,g.timeouts[t]), pips='';
+    for(var i=0;i<total;i++) pips+='<i'+(i<g.timeouts[t]?'':' class="used"')+'></i>';
+    if(r.tos.innerHTML!==pips) r.tos.innerHTML=pips;
+    r.fls.textContent='FLS '+g.fouls[t];
+    r.row.classList.toggle('inbonus',g.fouls[other(t)]>=st.rules.bonusAt);    // you are in the bonus when the OTHER team has enough fouls
+    r.row.classList.toggle('haspos',g.possession===t);
+  });
+  var label=g.final?'FINAL':periodLabel(g.period);
+  if(el.period.textContent!==label){ el.period.textContent=label; if(oldGame&&A.period) retrigger(el.period,'flip'); }
+  el.bug.classList.toggle('final',!!g.final);
+  var wasVisible=oldGame?bugShown(oldGame):false, vis=bugShown(g);   // the name graphic can ask the scoreboard to step aside
+  el.bug.classList.toggle('off',!vis);
+  if(!vis) el.strip.classList.remove('on');
+  if(vis&&!wasVisible) playIntro();
+  if(fresh){
+    if(fresh.type==='intro') playIntro();
+    else if(fresh.type==='horn') fxBuzzer(true);
+    else if(fresh.type==='timeout'&&A.timeout){ var T=st.teams[fresh.team];
+      showStrip([['TIMEOUT',''],[T.name,''],[g.timeouts[fresh.team]+' LEFT','dim']],T.color,contrast(T.color)); }
+    else if(fresh.type==='period'&&A.period) showStrip([[startText(),'']]);
+    else if(fresh.type==='final'&&A.period){ var a=L2('away'), h=L2('home'); showStrip([['FINAL',''],[a+'   '+h,'dim']]); }
+  }
+}
+function L2(t){ return S.settings.teams[t].abbr+' '+S.game.score[t]; }
+
+function render(oldGame){ applySettings(); applyLower(); applyGame(oldGame); applyCountdown(oldGame); syncGfx(); syncPanel(); lastClockText=null; lastShotText=null; }
+
+/* ---- lower third (name graphic) ---- */
+$('#ltImg').src=USN_LOGO;
+function lowerText(g){                  // which words go where: a = left bar, b = right bar, sub = second line
+  var L=(g||S.game).lt, comm=L.mode!=='player';
+  var a=(comm?L.n1:'').trim(), b=(comm?L.n2:L.name).trim(), sub=comm?'':L.sub.trim();
+  if(comm&&!b){ b=a; a=''; }             // one commentator: logo + a single bar
+  return {a:a,b:b,sub:sub};
+}
+function applyLower(){
+  var st=S.settings, W=st.lower, L=S.game.lt, n=el.lt, t=lowerText();
+  n.style.setProperty('--lt-logo',W.logoBg); n.style.setProperty('--lt-logo-hi',shade(W.logoBg,0.2));
+  n.style.setProperty('--lt-bar',W.barBg);   n.style.setProperty('--lt-bar-hi',shade(W.barBg,0.09));
+  n.style.setProperty('--lt-tx',W.text);     n.style.setProperty('--lt-sub',shade(W.logoBg,0.5));
+  el.ltN1.textContent=t.a; el.ltN2.textContent=t.b; el.ltSub.textContent=t.sub; el.ltSub.hidden=!t.sub;
+  n.classList.toggle('solo',!t.a); n.classList.toggle('hassub',!!t.sub); n.classList.toggle('noanim',!st.anim.lower);
+  [el.ltN1,el.ltN2].forEach(function(x){ x.style.fontSize=''; var w=x.offsetWidth; if(w>620) x.style.fontSize=Math.floor(40*620/w)+'px'; });   // shrink very long names
+  placeLower();
+  n.classList.toggle('on',!!L.show&&!!t.b);
+}
+function placeLower(){
+  var W=S.settings.lower, pos=S.game.lt.pos||'bc', s=el.lt.style, tx='';
+  s.left=s.right=s.top=s.bottom='';
+  if(mode==='control'){                  // small preview under the scoreboard
+    s.left='50%'; s.bottom='14px'; s.transformOrigin='50% 100%';
+    s.transform='translateX(-50%) scale('+Math.min(0.7,760/Math.max(1,el.lt.offsetWidth))+')'; return;
+  }
+  var v=pos.charAt(0), h=pos.charAt(1), m=W.margin+'px';
+  if(v==='t') s.top=m; else s.bottom=m;
+  if(h==='l') s.left=m; else if(h==='r') s.right=m; else { s.left='50%'; tx='translateX(-50%) '; }
+  s.transformOrigin=(h==='l'?'0':h==='r'?'100%':'50%')+' '+(v==='t'?'0':'100%');
+  s.transform=tx+'scale('+W.scale+')';
+}
+function stageRect(pos,margin,w,h){     // where a box of w x h lands on the 1920x1080 stage
+  var v=pos.charAt(0), c=pos.charAt(1);
+  return {x:c==='l'?margin:c==='r'?1920-margin-w:(1920-w)/2, y:v==='t'?margin:1080-margin-h, w:w, h:h};
+}
+function bugShown(g){                   // is the scoreboard on screen, given the name graphic?
+  if(!g||!g.visible) return false;
+  if(g.cd&&g.cd.show) return false;                        // the countdown screen is in its spot
+  if(gfxWanted(g)&&LIB.opts.hideBug) return false;         // a full-screen graphic is up
+  var K=S.settings.look;
+  return clearOfLower(g,730*K.scale,208*K.scale);
+}
+function clearOfLower(g,w,h){           // false if the name graphic is up and would cover a w x h box in the scoreboard's spot
+  var W=S.settings.lower, L=g.lt;
+  if(!L||!L.show||!lowerText(g).b||W.hideBug==='never') return true;
+  if(W.hideBug==='always') return false;
+  var K=S.settings.look, a=stageRect(K.pos,K.margin,w,h),
+      b=stageRect(L.pos||'bc',W.margin,el.lt.offsetWidth*W.scale,92*W.scale), pad=16;
+  return !(a.x<b.x+b.w+pad&&b.x<a.x+a.w+pad&&a.y<b.y+b.h+pad&&b.y<a.y+a.h+pad);   // hide only when the two would overlap
+}
+
+/* ---- one-shot animations ---- */
+function D(){ return 1/Math.max(0.25,S.settings.anim.speed); }
+function fxScore(t,pts){
+  var r=rows[t], A=S.settings.anim, oldText=r.score.textContent;
+  r.score.textContent=S.game.score[t];
+  if(A.score){
+    var gh=document.createElement('span'); gh.className='ghost'; gh.textContent=oldText; r.scorecell.appendChild(gh);
+    setTimeout(function(){ gh.remove(); },450*D());
+    retrigger(r.score,'in'); r.scorecell.classList.remove('flash','flash3'); retrigger(r.scorecell,pts>=3?'flash3':'flash');
+    retrigger(r.teamcell,'lift');
+  }
+  if(A.logo) retrigger(r.logo,'pulse');
+  if(pts>=3&&A.three) retrigger(r.sweep,'go');
+  sfx(pts>=3?'three':'score');
+}
+function fxBuzzer(manual){
+  if(S.settings.anim.buzzer){ retrigger(el.clockCell,'buzz'); retrigger(el.bug,'buzz'); }
+  sfx('buzzer');
+  if(!manual&&S.settings.anim.period) showStrip([[endText(),'']]);
+}
+function fxShotViolation(){ if(S.settings.anim.shot) retrigger(el.shotCell,'viol'); sfx('shot'); }
+function playIntro(){
+  if(!S.settings.anim.intro||!S.game.visible) return;
+  retrigger(el.bug,'intro');
+  clearTimeout(playIntro.t); playIntro.t=setTimeout(function(){ el.bug.classList.remove('intro'); },1700*D());
+}
+var stripTimer=0;
+function showStrip(parts,bg,tx,ms){     // parts = [[text, cssClass], ...]
+  el.stripInner.textContent='';
+  parts.forEach(function(p){ var s=document.createElement('span'); s.textContent=p[0]; if(p[1]) s.className=p[1]; el.stripInner.appendChild(s); });
+  el.stripInner.style.setProperty('--sb',bg||S.settings.look.clockBg);
+  el.stripInner.style.setProperty('--st',tx||S.settings.look.clockTx);
+  el.strip.classList.add('on');
+  clearTimeout(stripTimer); stripTimer=setTimeout(function(){ el.strip.classList.remove('on'); },ms||3600);
+}
+
+/* ---- the 60fps loop: only the clocks change every frame ---- */
+var lastClockText=null, lastShotText=null, lastCr=null, lastSr=null;
+function setDigits(node,text){          // fixed-width digits so the clock does not wobble
+  var html='';
+  for(var i=0;i<text.length;i++){ var c=text.charAt(i); html+='<span class="'+((c===':'||c==='.')?'pt':'dg')+'">'+c+'</span>'; }
+  node.innerHTML=html;
+}
+function tick(){
+  var st=S.settings, g=S.game, cr=rem(g.clock), sr=rem(g.shot);
+  var ct=fmtClock(cr);
+  if(ct!==lastClockText){ lastClockText=ct; setDigits(el.clock,ct); if(panelOut.clock) panelOut.clock.textContent=ct; }
+  el.clockCell.classList.toggle('low',st.anim.clockRed&&cr<60000);
+  var blank=cr>0&&sr>cr+50;             // more shot clock than game clock left: the shot clock is off
+  var stx=blank?'':String(Math.ceil(sr/1000));
+  if(stx!==lastShotText){
+    lastShotText=stx; el.shot.textContent=stx; if(panelOut.shot) panelOut.shot.textContent=stx||'off';
+    var low=st.anim.shot&&!blank&&sr<=5000;
+    el.shotCell.classList.toggle('low',low);
+    if(low&&sr>0&&g.shot.running) retrigger(el.shotCell,'beat');
+  }
+  if(lastCr!==null){                    // a clock just ran out (not "was typed in as zero")
+    if(cr===0&&lastCr>0&&lastCr<1500) fxBuzzer(false);
+    else if(sr===0&&lastSr>0&&lastSr<1500&&st.rules.shotOn&&cr>0) fxShotViolation();
+  }
+  lastCr=cr; lastSr=sr;
+  cdTick();
+  requestAnimationFrame(tick);
+}
+function authorityCheck(){              // the control side records that a clock has stopped at zero
+  if(!isAuthority) return;
+  var g=S.game;
+  if(g.clock.running&&rem(g.clock)<=0){ commit(function(st,gg){ gg.clock={running:false,ms:0,t0:0}; freeze(gg.shot); possFlush(gg); }); halfCheck(); }
+  else if(g.shot.running&&rem(g.shot)<=0) commit(function(st,gg){ gg.shot={running:false,ms:0,t0:0}; });
+}
+setInterval(authorityCheck,50);
+
+/* ============================================================
+   9. CONTROL PANEL
+   Inputs with data-set="path"  edit S.settings.path
+   Inputs with data-game="path" edit S.game.path
+   Buttons with data-act="name:arg:arg" call ACT.name(arg, arg)
+   ============================================================ */
+var panelOut={};
+function keyFor(spec){ for(var i=0;i<KEYS.length;i++) if(KEYS[i][1]===spec) return '<kbd>'+(KEYS[i][0]==='space'?'Space':KEYS[i][0].toUpperCase())+'</kbd>'; return ''; }
+function B(spec,label,cls){ return '<button class="btn '+(cls||'')+'" data-act="'+spec+'">'+label+keyFor(spec)+'</button>'; }
+function F(label,inner){ return '<label class="f">'+label+inner+'</label>'; }
+function I(path,type,extra){ return '<input type="'+(type||'text')+'" data-set="'+path+'" '+(extra||'')+'>'; }
+function C(path,label){ return '<label class="chk"><input type="checkbox" data-set="'+path+'">'+label+'</label>'; }
+function Sel(path,opts){ return '<select data-set="'+path+'">'+opts.map(function(o){ return '<option value="'+o[0]+'">'+o[1]+'</option>'; }).join('')+'</select>'; }
+
+function teamGameCard(t){ return ''+
+  '<div class="card tcard"><div class="thead" data-head="'+t+'"><span data-out="teams.'+t+'.name"></span><span class="side">'+t.toUpperCase()+'</span></div>'+
+  '<div class="body"><input class="bigin" type="number" min="0" data-game="score.'+t+'" aria-label="'+t+' score">'+
+  '<div class="grid g4">'+B('score:'+t+':1','+1')+B('score:'+t+':2','+2')+B('score:'+t+':3','+3')+B('score:'+t+':-1','−1','warn')+'</div>'+
+  '<div class="stat"><span>Fouls</span><button class="btn sm" data-act="foul:'+t+':-1">−</button><input type="number" min="0" data-game="fouls.'+t+'"><button class="btn sm" data-act="foul:'+t+':1">+</button></div>'+
+  '<div class="stat"><span>Timeouts left</span><button class="btn sm" data-act="timeoutAdd:'+t+':-1">−</button><input type="number" min="0" data-game="timeouts.'+t+'"><button class="btn sm" data-act="timeoutAdd:'+t+':1">+</button></div>'+
+  '<div class="grid g2">'+B('timeout:'+t,'Timeout')+'<button class="btn" data-act="poss:'+t+'" data-poss="'+t+'">Possession</button></div>'+
+  '<div class="grid">'+B('foul:'+t+':1','Foul +1')+'</div>'+
+  '</div></div>'; }
+function teamSetupCard(t){ var p='teams.'+t+'.'; return ''+
+  '<div class="card"><h3>'+(t==='home'?'Home team':'Away team')+'</h3>'+
+  '<div class="grid g2" style="margin-top:0">'+F('Full name',I(p+'name'))+F('Abbreviation',I(p+'abbr','text','maxlength="5"'))+'</div>'+
+  '<div class="grid g3">'+F('Record (optional)',I(p+'record','text','placeholder="11-5"'))+F('Main colour',I(p+'color','color'))+F('Score box colour',I(p+'color2','color'))+'</div>'+
+  '<div class="grid g2">'+F('Logo (PNG, JPG or SVG)','<input type="file" accept="image/*" data-logo="'+t+'">')+
+  '<div class="f">&nbsp;<div class="inline" style="margin-top:0">'+B('logoClear:'+t,'Remove logo')+B('autoShade:'+t,'Auto shade')+'</div></div></div></div>'; }
+
+function buildPanel(){
+  if(!isAuthority) return;
+  var tabs=[['game','Game'],['stats','Stats'],['names','Names'],['cd','Countdown'],['gfx','Graphics'],['lib','Library'],['teams','Teams'],['rules','Rules'],['look','Look'],['fx','Animations'],['presets','Presets'],['remote','Remote'],['help','Help']];
+  var base=location.href.split('?')[0].split('#')[0];
+  var html='<div class="tabs">'+tabs.map(function(t,i){ return '<button class="tab'+(i?'':' on')+'" data-tab="'+t[0]+'">'+t[1]+'</button>'; }).join('')+'<span class="netdot" data-live="netDot" hidden></span></div>';
+
+  /* --- Game --- */
+  html+='<div class="pane on" data-pane="game">'+
+    '<div class="card"><div class="lbl">Game clock · <span data-live="period"></span></div><div class="big" data-live="clock"></div>'+
+      '<button class="btn go" style="width:100%" data-act="clockToggle" data-live="startBtn"></button>'+
+      '<div class="grid g4">'+B('clockNudge:-1','−1s')+B('clockNudge:1','+1s')+B('clockNudge:-10','−10s')+B('clockNudge:10','+10s')+'</div>'+
+      '<div class="inline"><input id="setClock" placeholder="Set time, e.g. 8:00 or 45.3" data-enter="clockSet">'+B('clockSet','Set')+'</div>'+
+      '<div class="grid g3">'+B('prevPeriod','◀ Period')+B('nextPeriod','Next period ▶','primary')+'<button class="btn" data-act="final" data-live="finalBtn">Final</button></div>'+
+      '<div class="grid">'+B('clockFull','Reset clock to full period')+'</div></div>'+
+    '<div class="card" data-live="shotCard"><div class="lbl">Shot clock</div><div class="big" data-live="shot"></div>'+
+      '<div class="grid g2" style="margin-top:0"><button class="btn primary" data-act="shotReset:full"><span data-live="shotFull"></span>'+keyFor('shotReset:full')+'</button>'+
+      '<button class="btn primary" data-act="shotReset:short"><span data-live="shotShort"></span>'+keyFor('shotReset:short')+'</button></div>'+
+      '<div class="grid g3">'+B('shotToggle','Start / stop')+B('shotNudge:-1','−1s')+B('shotNudge:1','+1s')+'</div>'+
+      '<div class="inline"><input id="setShot" placeholder="Set seconds, e.g. 14" data-enter="shotSet">'+B('shotSet','Set')+'</div></div>'+
+    '<div class="teams2">'+teamGameCard('home')+teamGameCard('away')+'</div>'+
+    '<div class="card"><div class="grid g2" style="margin-top:0"><button class="btn" data-act="visible" data-live="visBtn"></button>'+B('intro','Replay intro')+
+      B('possSwitch','Switch possession')+B('horn','Horn')+'</div>'+
+      '<div class="grid">'+B('newGame','New game (reset scores and clock)','warn')+'</div></div>'+
+  '</div>';
+
+  /* --- Names (lower third) --- */
+  var GT=function(path,ph){ return '<input type="text" maxlength="40" data-gtext="'+path+'" placeholder="'+(ph||'')+'" autocomplete="off">'; };
+  var PB=function(pos,label){ return '<button class="btn" data-act="lowerPos:'+pos+'" data-ltpos="'+pos+'">'+label+keyFor('lowerPos:'+pos)+'</button>'; };
+  html+='<div class="pane" data-pane="names">'+
+    '<div class="card"><button class="btn go" style="width:100%" data-act="lower" data-live="ltBtn"></button>'+
+      '<div class="grid g2"><button class="btn" data-act="lowerMode:comm" data-ltmode="comm">Commentators</button><button class="btn" data-act="lowerMode:player" data-ltmode="player">Player interview</button></div>'+
+      '<p class="note">'+keyFor('lowerMode')+' switches between the two. The highlighted one is what shows.</p></div>'+
+    '<div class="card"><h3>Commentators</h3><div class="grid g2" style="margin-top:0">'+F('Left name',GT('lt.n1','First commentator'))+F('Right name',GT('lt.n2','Second commentator'))+'</div>'+
+      '<p class="note">Leave one box empty if there is only one commentator.</p></div>'+
+    '<div class="card"><h3>Player interview</h3><div class="grid" style="margin-top:0">'+F('Name',GT('lt.name','Player name'))+
+      F('Second line (optional): number, position or team',GT('lt.sub','#12 · Guard · UNIS'))+'</div></div>'+
+    '<div class="card"><h3>Position</h3><div class="posgrid">'+PB('tl','Top left')+'<span></span>'+PB('tr','Top right')+PB('bl','Bottom left')+PB('bc','Bottom centre')+PB('br','Bottom right')+'</div>'+
+      '<p class="note">Move it if it covers someone\'s face. It can be moved while it is showing.</p></div>'+
+    '<div class="card"><h3>Style</h3><div class="grid g3" style="margin-top:0">'+F('Logo block',I('lower.logoBg','color'))+F('Name bar',I('lower.barBg','color'))+F('Name text',I('lower.text','color'))+'</div>'+
+      '<div class="grid g2">'+F('Size',I('lower.scale','range','min="0.6" max="1.6" step="0.05"'))+F('Distance from the edge (px)',I('lower.margin','number','min="0" max="300" step="2"'))+'</div>'+
+      '<div class="grid">'+F('Scoreboard while the names are showing',Sel('lower.hideBug',[['overlap','Hide it only if the names would cover it'],['always','Always hide it'],['never','Never hide it']]))+'</div>'+
+      C('anim.lower','Animate the names in and out')+'</div></div>';
+
+  /* --- Graphics + Library (built in section 11) --- */
+  html+=gfxPanes();
+  html+=statsPane();
+  html+=cdPane();
+
+  /* --- Teams --- */
+  html+='<div class="pane" data-pane="teams">'+teamSetupCard('home')+teamSetupCard('away')+
+    '<div class="card">'+B('swapTeams','Swap home and away')+'<p class="note">Logos are shrunk to 256 px so they save quickly. A square PNG with a transparent background looks best.</p></div></div>';
+
+  /* --- Rules --- */
+  html+='<div class="pane" data-pane="rules"><div class="card"><h3>Game clock</h3>'+
+    '<div class="grid g3" style="margin-top:0">'+F('Minutes per period',I('rules.periodMin','number','min="1" max="30" step="1"'))+
+      F('Number of periods',I('rules.periods','number','min="1" max="8" step="1"'))+F('Overtime minutes',I('rules.otMin','number','min="1" max="30" step="1"'))+'</div></div>'+
+    '<div class="card"><h3>Shot clock</h3>'+C('rules.shotOn','Show a shot clock')+C('rules.shotLinked','Start and stop it with the game clock')+
+      '<div class="grid g2">'+F('Full length (seconds)',I('rules.shotSec','number','min="5" max="60" step="1"'))+F('Short reset (seconds)',I('rules.shotShort','number','min="5" max="60" step="1"'))+'</div></div>'+
+    '<div class="card"><h3>Fouls and timeouts</h3>'+
+      '<div class="grid g2" style="margin-top:0">'+F('Timeouts per team',I('rules.timeouts','number','min="0" max="10" step="1"'))+F('Bonus at this many team fouls',I('rules.bonusAt','number','min="1" max="20" step="1"'))+'</div>'+
+      C('rules.foulReset','Reset team fouls at each new period')+
+      '<p class="note">A team\'s BONUS tab lights up when the other team reaches the foul limit. Check your league\'s rules: these defaults are 8-minute quarters, a 35-second shot clock, and bonus on the 5th foul each quarter.</p></div></div>';
+
+  /* --- Look --- */
+  html+='<div class="pane" data-pane="look"><div class="card"><h3>Position and size</h3>'+
+    '<div class="grid g2" style="margin-top:0">'+F('Position on screen',Sel('look.pos',[['bl','Bottom left'],['bc','Bottom centre'],['br','Bottom right'],['tl','Top left'],['tc','Top centre'],['tr','Top right']]))+
+      F('Distance from the edge (px)',I('look.margin','number','min="0" max="300" step="2"'))+'</div>'+
+    '<div class="grid">'+F('Size',I('look.scale','range','min="0.5" max="2" step="0.05"'))+'</div></div>'+
+    '<div class="card"><h3>Text</h3><div class="grid g2" style="margin-top:0">'+F('Font',Sel('look.font',Object.keys(FONTS).map(function(f){ return [f,f]; })))+
+      F('Team label',Sel('look.label',[['abbr','Abbreviation'],['name','Full name']]))+'</div>'+
+      C('look.showRecord','Show the team record')+C('look.showStats','Show timeouts and fouls')+C('look.homeTop','Home team on the top row')+
+      '<p class="note">Fonts other than Impact download from Google Fonts the first time, so the computer needs internet once.</p></div>'+
+    '<div class="card"><h3>Theme colours</h3><div class="grid g3" style="margin-top:0">'+
+      F('Clock background',I('look.clockBg','color'))+F('Clock digits',I('look.clockTx','color'))+F('Last-minute red',I('look.low','color'))+
+      F('Period background',I('look.metaBg','color'))+F('Period text',I('look.metaTx','color'))+F('Bonus highlight',I('look.accent','color'))+'</div>'+
+      C('look.gloss','Glossy highlight (off = flat)')+C('look.badge','Put logos in a round badge')+
+      '<div class="grid">'+F('Corner roundness',I('look.radius','range','min="0" max="24" step="1"'))+'</div></div>'+
+    '<div class="card"><h3>Background</h3><div class="grid g2" style="margin-top:0">'+F('Behind the scoreboard',Sel('look.bg',[['transparent','Transparent (for OBS)'],['color','Solid colour']]))+
+      F('Solid colour',I('look.bgColor','color'))+'</div><p class="note">The grey checks in the preview mean "transparent". They do not appear in OBS.</p></div></div>';
+
+  /* --- Animations + sound --- */
+  html+='<div class="pane" data-pane="fx"><div class="card"><h3>Animations</h3>'+F('Speed (left = slower, right = faster)',I('anim.speed','range','min="0.5" max="2" step="0.1"'))+
+      C('anim.intro','Intro when the scoreboard appears')+C('anim.score','Score roll and flash')+C('anim.three','"3-POINTER!" banner')+
+      C('anim.logo','Logo pulse when a team scores')+C('anim.shot','Shot clock turns red in the last 5 seconds')+
+      C('anim.clockRed','Game clock turns red under 1 minute')+C('anim.buzzer','Buzzer flash at 0')+
+      C('anim.period','Period banners (end of quarter, halftime, final)')+C('anim.timeout','Timeout banner')+'</div>'+
+    '<div class="card"><h3>Sound</h3>'+C('sound.on','Sound effects on (untick to mute)')+
+      '<div class="grid">'+F('Volume',I('sound.vol','range','min="0" max="1" step="0.05"'))+'</div>'+
+      C('sound.score','Score sounds')+C('sound.buzzer','Buzzer and horn')+C('sound.shot','Shot clock violation')+
+      '<p class="note">Sounds play from the window that shows the scoreboard. They start muted, because the gym already has a real buzzer.</p></div></div>';
+
+  /* --- Presets --- */
+  html+='<div class="pane" data-pane="presets"><div class="card"><h3>Save this setup</h3>'+
+      '<div class="inline" style="margin-top:0"><input id="presetName" placeholder="e.g. UNIS vs Dalton" data-enter="presetSave">'+B('presetSave','Save','primary')+'</div>'+
+      '<p class="note">A preset stores both teams, logos, colours, rules and the look. It does not store the score.</p><div class="plist" id="presetList"></div></div>'+
+    '<div class="card"><h3>Move to another computer</h3><div class="grid g2" style="margin-top:0">'+B('exportAll','Export to a file')+
+      '<label class="btn" style="display:flex;align-items:center;justify-content:center">Import a file<input type="file" accept=".json,application/json" id="importFile" hidden></label></div></div>'+
+    '<div class="card">'+B('resetAll','Reset everything to defaults','warn')+'</div></div>';
+
+  /* --- Remote --- */
+  html+='<div class="pane" data-pane="remote"><div class="card"><h3>Remote control</h3><p class="note" data-live="netText" style="margin-top:0"></p>'+
+      '<div class="grid">'+F('Database address (from Firebase)','<input id="rDb" placeholder="https://your-project-default-rtdb.firebaseio.com" autocapitalize="off" autocomplete="off" spellcheck="false">')+'</div>'+
+      '<div class="grid g2">'+F('Room code (keep it private)','<input id="rRoom" autocapitalize="off" autocomplete="off" spellcheck="false">')+'<div class="f">&nbsp;'+B('roomNew','New code')+'</div></div>'+
+      '<div class="grid">'+F('Web address of the hosted page','<input id="rPage" placeholder="https://yourname.github.io/scoreboard/" autocapitalize="off" autocomplete="off" spellcheck="false">')+'</div>'+
+      '<div class="grid g2">'+B('relayConnect','Connect','primary')+B('relayDisconnect','Disconnect')+'</div></div>'+
+    '<div class="card"><h3>Link for the phone or second laptop</h3><span class="url" data-live="shareLink"></span>'+B('relayCopy','Copy link')+
+      '<p class="note">Anyone with this link can change the score, so only send it to your scorekeeper.</p></div>'+
+    '<div class="card"><h3>One-time setup</h3>'+
+      '<p class="note" style="margin-top:0"><b>1.</b> Make a free Firebase project and add a Realtime Database. In its Rules tab, paste the rules below and publish.</p>'+
+      '<pre class="url">{\n  "rules": {\n    "usn": {\n      "$room": { ".read": true, ".write": true }\n    }\n  }\n}</pre>'+
+      '<p class="note"><b>2.</b> Put this file on the web (for example GitHub Pages) so a phone can open it.</p>'+
+      '<p class="note"><b>3.</b> Fill in the three boxes above on the computer that runs OBS and press Connect.</p></div></div>';
+
+  /* --- Help --- */
+  html+='<div class="pane" data-pane="help"><div class="card"><h3>Keyboard shortcuts</h3><table class="keys">'+
+      KEYS.map(function(k){ return '<tr><td><kbd>'+(k[0]==='space'?'Space':k[0].toUpperCase())+'</kbd></td><td>'+k[2]+'</td></tr>'; }).join('')+
+      '</table><p class="note">Shortcuts work when this panel has focus and you are not typing in a box.</p></div>'+
+    '<div class="card"><h3>Use it in OBS</h3>'+
+      '<p class="note" style="margin-top:0"><b>1. Scoreboard.</b> Sources → + → Browser. Tick <i>Local file</i> and choose this file. Width 1920, height 1080.</p>'+
+      '<p class="note"><b>2. Controls.</b> Docks → Custom Browser Docks. Name it "Scoreboard" and paste this address:</p><span class="url">'+base+'?view=control</span>'+
+      '<p class="note">Run the game from that dock. The scoreboard in the scene follows it.</p>'+
+      '<p class="note"><b>Without OBS:</b> open these in two windows of the same browser.</p><span class="url">'+base+'?view=overlay</span><span class="url">'+base+'?view=control</span></div></div>';
+
+  el.panel.innerHTML=html;
+  $$('[data-live]',el.panel).forEach(function(n){ panelOut[n.dataset.live]=n; });
+
+  el.panel.addEventListener('click',function(e){
+    var tab=e.target.closest('[data-tab]');
+    if(tab){ $$('.tab',el.panel).forEach(function(b){ b.classList.toggle('on',b===tab); });
+             $$('.pane',el.panel).forEach(function(p){ p.classList.toggle('on',p.dataset.pane===tab.dataset.tab); }); return; }
+    var b=e.target.closest('[data-act]'); if(!b) return;
+    act(b.dataset.act,b); b.blur();
+  });
+  el.panel.addEventListener('input',function(e){ var t=e.target;
+    if(t.dataset.set&&t.type!=='number'&&t.type!=='file') settingChanged(t);
+    else if(t.dataset.gtext) commit(function(st,g){ setPath(g,t.dataset.gtext,t.value); });      // name graphic text
+    else if(t.dataset.lib) libInput(t);                                                              // team library / graphics options
+  });
+  el.panel.addEventListener('change',function(e){
+    var t=e.target;
+    if(t.type==='checkbox'||t.tagName==='SELECT') setTimeout(function(){ t.blur(); },0);   // so keyboard shortcuts work again straight away
+    if(t.dataset.set) settingChanged(t);
+    else if(t.dataset.game){ var v=Math.max(0,parseInt(t.value,10)||0); commit(function(st,g){ setPath(g,t.dataset.game,v); }); }
+    else if(t.dataset.logo) readLogo(t.files[0],t.dataset.logo,t);
+    else if(t.id==='importFile') importFile(t.files[0],t);
+    else if(t.dataset.liblogo!==undefined) readLibLogo(t.files[0],t);
+    else if(t.id==='libEdit'){ libEditId=t.value; renderLib(); }
+    else if(t.dataset.libsel) libCommit(function(L){ L[t.dataset.libsel]=t.value; });
+  });
+  $('#panelToggle').addEventListener('click',function(){ ACT.panel(); });
+  renderPresets();
+  renderLib(); syncLibUI(false);
+}
+
+function settingChanged(t){
+  var v;
+  if(t.type==='checkbox') v=t.checked;
+  else if(t.type==='number'||t.type==='range'){ v=parseFloat(t.value); if(isNaN(v)) return;
+    if(t.min!=='') v=Math.max(+t.min,v); if(t.max!=='') v=Math.min(+t.max,v); }
+  else v=t.value;
+  var oldR=clone(S.settings.rules), m=t.dataset.set.match(/^teams\.(home|away)\.color$/);
+  commit(function(st,g){
+    if(m){ var T=st.teams[m[1]]; if(T.color2===shade(T.color,SHADE)) T.color2=shade(v,SHADE); }   // score box follows the team colour until you pick your own
+    setPath(st,t.dataset.set,v);
+    var r=st.rules;                      // keep an untouched clock in step with the new rule
+    if(!g.clock.running&&g.clock.ms===periodLen(oldR,g.period)) g.clock.ms=periodLen(r,g.period);
+    if(!g.shot.running&&g.shot.ms===oldR.shotSec*1000) g.shot.ms=r.shotSec*1000;
+    TEAMS.forEach(function(x){ if(g.timeouts[x]===oldR.timeouts) g.timeouts[x]=r.timeouts; });
+  });
+}
+
+function syncPanel(){                   // copy the current state into the panel (but never into the box being typed in)
+  if(!isAuthority||!el.panel.firstChild) return;
+  var st=S.settings, g=S.game, focus=document.activeElement;
+  $$('[data-set]',el.panel).forEach(function(n){ if(n===focus) return; var v=getPath(st,n.dataset.set);
+    if(n.type==='checkbox') n.checked=!!v; else if(String(n.value)!==String(v)) n.value=v; });
+  $$('[data-game]',el.panel).forEach(function(n){ if(n===focus) return; var v=getPath(g,n.dataset.game); if(String(n.value)!==String(v)) n.value=v; });
+  $$('[data-out]',el.panel).forEach(function(n){ n.textContent=getPath(st,n.dataset.out)||''; });
+  $$('[data-head]',el.panel).forEach(function(n){ var T=st.teams[n.dataset.head]; n.style.background=T.color; n.style.color=contrast(T.color); });
+  $$('[data-poss]',el.panel).forEach(function(n){ n.classList.toggle('on',g.possession===n.dataset.poss); });
+  var o=panelOut, sp=keyFor('clockToggle');
+  o.period.textContent=g.final?'FINAL':periodLabel(g.period);
+  o.startBtn.innerHTML=(g.clock.running?'■ Stop clock':'▶ Start clock')+sp; o.startBtn.classList.toggle('running',g.clock.running);
+  o.finalBtn.classList.toggle('on',!!g.final);
+  o.visBtn.innerHTML=(g.visible?'Hide scoreboard':'Show scoreboard')+keyFor('visible');
+  o.shotFull.textContent='Reset '+st.rules.shotSec; o.shotShort.textContent='Reset '+st.rules.shotShort;
+  o.shotCard.hidden=!st.rules.shotOn;
+  $$('[data-gtext]',el.panel).forEach(function(n){ if(n===focus) return; var v=getPath(g,n.dataset.gtext)||''; if(n.value!==v) n.value=v; });
+  $$('[data-ltmode]',el.panel).forEach(function(n){ n.classList.toggle('on',(g.lt.mode==='player'?'player':'comm')===n.dataset.ltmode); });
+  $$('[data-ltpos]',el.panel).forEach(function(n){ n.classList.toggle('on',g.lt.pos===n.dataset.ltpos); });
+  o.ltBtn.innerHTML=(g.lt.show?'■ Hide names':'▶ Show names')+keyFor('lower'); o.ltBtn.classList.toggle('running',!!g.lt.show);
+  syncStats();
+  syncCountdown();
+  $$('[data-gfx]',el.panel).forEach(function(n){ n.classList.toggle('on',gfxWanted(g)===n.dataset.gfx); });
+}
+
+/* ---- logos, presets, import/export ---- */
+function readLogo(file,team,input){
+  if(!file) return;
+  var fr=new FileReader();
+  fr.onload=function(){
+    var raw=fr.result, img=new Image();
+    img.onload=function(){
+      var w=img.naturalWidth, h=img.naturalHeight, out=raw;
+      if(w&&h){ var k=Math.min(1,256/Math.max(w,h)), c=document.createElement('canvas');     // shrink big images
+        c.width=Math.max(1,Math.round(w*k)); c.height=Math.max(1,Math.round(h*k));
+        try{ c.getContext('2d').drawImage(img,0,0,c.width,c.height); out=c.toDataURL('image/png'); }catch(e){ out=raw; } }
+      if(out.length>900000){ toast('That image is too big. Try a smaller one.'); return; }
+      commit(function(st){ st.teams[team].logo=out; }); if(input) input.value='';
+    };
+    img.onerror=function(){ toast('Could not read that image'); };
+    img.src=raw;
+  };
+  fr.readAsDataURL(file);
+}
+function presets(){ try{ return JSON.parse(localStorage.getItem(PKEY))||[]; }catch(e){ return []; } }
+function savePresets(list){ try{ localStorage.setItem(PKEY,JSON.stringify(list)); }catch(e){ toast('Storage is full. Delete a preset first.'); } renderPresets(); }
+function renderPresets(){
+  var box=$('#presetList'); if(!box) return; box.textContent='';
+  presets().forEach(function(p,i){
+    var row=document.createElement('div'); row.className='pitem';
+    var name=document.createElement('span'); name.textContent=p.name; row.appendChild(name);
+    row.insertAdjacentHTML('beforeend','<button class="btn sm primary" data-act="presetLoad:'+i+'">Load</button><button class="btn sm warn" data-act="presetDelete:'+i+'">Delete</button>');
+    box.appendChild(row);
+  });
+  if(!box.firstChild) box.innerHTML='<p class="note" style="margin:0">No presets yet.</p>';
+}
+function importFile(file,input){
+  if(!file) return;
+  var fr=new FileReader();
+  fr.onload=function(){
+    try{ var d=JSON.parse(fr.result);
+      if(Array.isArray(d.presets)){ var names={}, list=presets().concat(d.presets).reverse().filter(function(p){ if(!p||!p.name||names[p.name]) return false; names[p.name]=1; return true; }).reverse(); savePresets(list); }
+      if(d.settings) commit(function(){ S.settings=merge(defaults(),d.settings); });
+      if(d.lib&&Array.isArray(d.lib.teams)){ var nl=normalizeLib(d.lib), lg=(d.logos&&d.logos.map)?d.logos.map:null; libEditId=nl.sel;
+        libCommit(function(){ LIB=nl; if(lg) LOGOS.map=lg; },true,!!lg); }
+      toast('Imported');
+    }catch(e){ toast('That file is not a scoreboard settings file'); }
+    input.value='';
+  };
+  fr.readAsText(file);
+}
+var toastTimer=0;
+function toast(msg){ var t=$('#toast'); if(!t) return; t.textContent=msg; t.classList.add('on'); clearTimeout(toastTimer); toastTimer=setTimeout(function(){ t.classList.remove('on'); },2600); }
+
+/* ============================================================
+   11. BROADCAST GRAPHICS PACKAGE
+   Starting lineups, upcoming schedule and standings, plus the
+   team library they are built from.
+
+   LIB    the library: saved teams (each with a roster and a
+          schedule), the standings table and the options.
+          Saved in the browser and sent to the other windows /
+          the remote room whenever it changes.
+   LOGOS  the library teams' logos, kept apart from LIB because
+          they are large and rarely change.
+   Which graphic is on air lives in the game state (game.gfx.show)
+   so it travels with scores and the clock.
+   ============================================================ */
+var LKEY='usn_scoreboard_lib_v1', GKEY='usn_scoreboard_logos_v1';
+var GFX=['lineupHome','lineupAway','lineupBoth','schedule','standings','halftime'];
+function esc(v){ return String(v==null?'':v).replace(/[&<>"']/g,function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+function uid(){ return 't'+Math.random().toString(36).slice(2,8); }
+function lum(hex){ var c=hexRgb(hex).map(function(v){ v/=255; return v<=0.03928?v/12.92:Math.pow((v+0.055)/1.055,2.4); }); return 0.2126*c[0]+0.7152*c[1]+0.0722*c[2]; }
+
+/* ---- defaults and sample data (replace it all in the Library tab) ---- */
+function libOpts(){ return {
+  speed:1, hideBug:true,
+  style:{lineup:'slide',schedule:'pop',standings:'slide',halftime:'slide'},          // slide | wipe | fade | pop
+  lineup:{ht:true,cls:true,stat:true,statLabel:'PPG',bench:false,court:true},
+  schedCount:5, standTitle:'NYCAL STANDINGS',
+  badge:{nycal:'#f5b301',non:'#6b7280',usn:'#4f9fe6',yt:'#ff0000'}
+};}
+function sampleLib(){
+  var P=function(num,name,pos,ht,cls,stat,st){ return {num:num,name:name,pos:pos,ht:ht,cls:cls,stat:stat,st:!!st}; };
+  var G=function(opp,name,ha,date,time,type,plat){ return {opp:opp,name:name,ha:ha,date:date,time:time,type:type,plat:plat}; };
+  var R=function(team,name,lw,ll,ow,ol,streak){ return {team:team,name:name,lw:lw,ll:ll,ow:ow,ol:ol,gb:'',streak:streak}; };
+  return {stamp:'0',sel:'t1',home:'t1',away:'t2',opts:libOpts(),
+    teams:[
+      {id:'t1',name:'UNIS',short:'UNIS',abbr:'UNIS',record:'6-2',color:'#1d4f91',color2:shade('#1d4f91',SHADE),
+       roster:[P('3','Leo Marchetti','G','5-11','11','12.4',1),P('11','Sam Okonkwo','G','6-0','12','9.8',1),P('23','Mateo Alvarez','F','6-3','12','14.2',1),
+               P('24','Noah Lindgren','F','6-4','11','8.1',1),P('32','Elias Fontaine','C','6-6','12','10.5',1),
+               P('5','Kai Tanaka','G','5-10','10','4.0',0),P('14','Omar Haddad','F','6-2','11','3.6',0),P('21','Felix Brandt','G','6-0','12','5.1',0)],
+       schedule:[G('t2','','vs','FRI NOV 20','4:30 PM','NYCAL','USN'),G('t3','','at','TUE NOV 24','5:00 PM','NYCAL','YT'),
+                 G('','Eastside Day','vs','FRI DEC 4','4:30 PM','NON-LEAGUE','USN'),G('','Harbor School','at','TUE DEC 8','4:45 PM','NYCAL','YT'),
+                 G('','Northgate','vs','FRI DEC 11','4:30 PM','NON-LEAGUE','USN')]},
+      {id:'t2',name:'Riverside Prep',short:'Riverside',abbr:'RIV',record:'8-2',color:'#a3262e',color2:shade('#a3262e',SHADE),
+       roster:[P('1','Jalen Brooks','G','5-10','12','15.0',1),P('4','Theo Castillo','G','6-1','11','7.9',1),P('12','Marcus Webb','F','6-3','12','11.3',1),
+               P('20','Devon Clarke','F','6-5','10','6.2',1),P('33','Isaac Moreau','C','6-7','12','9.4',1),P('10','Ryan Patel','G','5-9','11','3.2',0),P('15','Luke Sorensen','F','6-2','10','2.8',0)],
+       schedule:[G('t1','','at','FRI NOV 20','4:30 PM','NYCAL','USN'),G('t3','','vs','MON NOV 23','5:00 PM','NYCAL','YT'),G('','Northgate','vs','WED DEC 2','4:30 PM','NYCAL','YT')]},
+      {id:'t3',name:'Hudson Academy',short:'Hudson',abbr:'HUD',record:'4-4',color:'#1f7a4d',color2:shade('#1f7a4d',SHADE),
+       roster:[P('2','Aiden Park','G','5-11','11','10.1',1),P('10','Caleb Reyes','G','6-0','12','8.7',1),P('15','Julian Frost','F','6-2','12','12.0',1),
+               P('22','Miles Osei','F','6-4','11','7.5',1),P('44','Henrik Sol','C','6-6','12','9.9',1)],
+       schedule:[G('t1','','vs','TUE NOV 24','5:00 PM','NYCAL','YT'),G('t2','','at','MON NOV 23','5:00 PM','NYCAL','YT'),G('','Eastside Day','at','THU DEC 3','4:30 PM','NON-LEAGUE','YT')]}
+    ],
+    standings:[R('t2','','6','1','8','2','W4'),R('t1','','5','1','6','2','W3'),R('','Harbor School','4','3','5','4','L1'),
+               R('t3','','3','3','4','4','W1'),R('','Eastside Day','2','5','3','6','L2'),R('','Northgate','1','6','2','7','L4')]
+  };
+}
+function normalizeLib(l){               // make sure every field exists, whatever version saved it
+  l=l||{}; l.opts=merge(libOpts(),l.opts||{});
+  if(!Array.isArray(l.teams)||!l.teams.length) l.teams=[{id:uid(),name:'New team',short:'New',abbr:'NEW',record:'',color:'#334155',color2:shade('#334155',SHADE)}];
+  l.teams.forEach(function(t){ if(!t.id) t.id=uid(); if(!Array.isArray(t.roster)) t.roster=[]; if(!Array.isArray(t.schedule)) t.schedule=[]; });
+  if(!Array.isArray(l.standings)) l.standings=[];
+  ['sel','home','away'].forEach(function(k){ if(!l.teams.some(function(t){ return t.id===l[k]; })) l[k]=l.teams[0].id; });
+  if(!l.stamp) l.stamp='0';
+  return l;
+}
+var LIB=(function(){ var s=null; try{ s=JSON.parse(localStorage.getItem(LKEY)); }catch(e){} return (s&&Array.isArray(s.teams))?normalizeLib(s):sampleLib(); })();
+var LOGOS=(function(){ var s=null; try{ s=JSON.parse(localStorage.getItem(GKEY)); }catch(e){} return (s&&s.map)?s:{stamp:'0',map:{}}; })();
+var libEditId=LIB.sel;                  // which team the Library tab is editing (this window only)
+function saveLib(){ try{ localStorage.setItem(LKEY,JSON.stringify(LIB)); }catch(e){ toast('Could not save the library (storage full).'); } }
+function saveLogos(){ try{ localStorage.setItem(GKEY,JSON.stringify(LOGOS)); }catch(e){ toast('Could not save the logos (storage full). Try smaller images.'); } }
+function teamById(id){ for(var i=0;i<LIB.teams.length;i++) if(LIB.teams[i].id===id) return LIB.teams[i]; return null; }
+function editTeam(){ return teamById(libEditId)||LIB.teams[0]; }
+
+/* ---- every change to the library goes through libCommit() ---- */
+function libCommit(fn,structural,logosChanged){
+  fn(LIB);
+  LIB.stamp=stamp(); mine.push(LIB.stamp);
+  if(logosChanged){ LOGOS.stamp=LIB.stamp; saveLogos(); }
+  if(mine.length>40) mine.shift();
+  saveLib();
+  if(bc) bc.postMessage({type:'lib',LIB:LIB,LOGOS:logosChanged?LOGOS:null});
+  if(relay.cfg){ relay.myLib=LIB.stamp; sendLib(); if(logosChanged){ relay.myLogos=LOGOS.stamp; sendLogos(); } }
+  libChanged(structural);
+}
+function adoptLib(lib,logos){           // a copy arrived from another window on this computer
+  var changed=false;
+  if(lib&&Array.isArray(lib.teams)&&lib.stamp!==LIB.stamp){ LIB=normalizeLib(lib); changed=true; }
+  if(logos&&logos.map&&logos.stamp!==LOGOS.stamp){ LOGOS=logos; changed=true; }
+  if(changed) libChanged(true);
+}
+function applyRemoteLib(kind,o){         // a copy arrived from the remote room
+  if(!o||!o.stamp) return;
+  var cur=(kind==='lib')?LIB.stamp:LOGOS.stamp, newest=(kind==='lib')?relay.myLib:relay.myLogos;
+  if(o.stamp===cur) return;
+  if(mine.indexOf(o.stamp)>=0&&o.stamp!==newest) return;               // an echo of my own older change
+  if(kind==='lib'){ if(!Array.isArray(o.teams)) return; LIB=normalizeLib(o); if(isAuthority) saveLib(); }
+  else{ if(!o.map) return; LOGOS=o; if(isAuthority) saveLogos(); }
+  if(isAuthority&&bc) bc.postMessage({type:'lib',LIB:LIB,LOGOS:(kind==='logos')?LOGOS:null});
+  libChanged(true);
+}
+var sendLib=makeSender('lib',function(){ return LIB; });
+var sendLogos=makeSender('logos',function(){ return LOGOS; });
+function libChanged(structural){
+  if(!teamById(libEditId)) libEditId=LIB.teams[0].id;
+  gfxLast=null;
+  render(S.game);
+  syncLibUI(structural);
+}
+
+/* ---- building the graphics ---- */
+function tvars(T){                      // CSS variables for a team's colours
+  var c=(T&&T.color)||'#334155', c2=(T&&T.color2)||shade(c,SHADE), a=lum(c)<0.16?shade(c,0.4):c, g=hexRgb(a);
+  return '--tc:'+c+';--tc2:'+c2+';--ttx:'+contrast(c)+';--tca:'+a+';--tcl:'+shade(c,0.62)+';--glow:rgba('+g[0]+','+g[1]+','+g[2]+',.5)';
+}
+function monoOf(T,name){ return esc((((T&&(T.abbr||T.short||T.name))||name||'?').trim().charAt(0)||'?').toUpperCase()); }
+function logoInner(T,name){ var src=T&&LOGOS.map[T.id]; return src?'<img alt="" src="'+esc(src)+'">':'<span class="mono">'+monoOf(T,name)+'</span>'; }
+function tlogo(T,name){                 // small round logo used in rows
+  var st=T?'--lc:'+T.color+';--lc2:'+(T.color2||shade(T.color,SHADE))+';--ltx:'+contrast(T.color):'';
+  return '<div class="tlogo" style="'+st+'">'+logoInner(T,name)+'</div>';
+}
+function gpHead(logoHtml,title,sub,right,usn){
+  return '<div class="gp-head"><div class="gp-logo'+(usn?' usn':'')+'">'+logoHtml+'</div><div class="gp-title"><b>'+esc(title)+'</b><span>'+esc(sub)+'</span></div>'+
+         (right?'<div class="gp-rec">'+esc(right)+'</div>':'')+'</div>';
+}
+function badge(text,bg){ return '<span class="gbadge" style="background:'+bg+';color:'+contrast(bg)+'">'+esc(text)+'</span>'; }
+function starters(T){ var r=T.roster||[], s=r.filter(function(p){ return p.st; }).slice(0,5); return s.length?s:r.slice(0,5); }
+
+function buildCourt(st){                // half court with the five starters placed on it: guards up top, bigs by the basket
+  var order={G:0,F:1,C:2}, five=st.map(function(p,i){ return {p:p,i:i}; }).sort(function(a,b){
+        var x=order[a.p.pos], y=order[b.p.pos]; x=(x===undefined)?1:x; y=(y===undefined)?1:y; return (x-y)||(a.i-b.i); });
+  var slots=[[50,22],[20,49],[80,49],[30,80],[70,80]];
+  var tags=five.map(function(o,k){ var s=slots[k]||slots[0], last=String(o.p.name||'').trim().split(/\s+/).pop();
+    return '<div class="lu-slot" style="left:'+s[0]+'%;top:'+s[1]+'%"><div class="lu-tag arow" style="--i:'+(k+2)+'"><b>'+esc(o.p.num)+'</b><span>'+esc(last)+'</span></div></div>'; }).join('');
+  var svg='<svg viewBox="0 0 560 520" fill="none" stroke="rgba(255,255,255,.5)" stroke-width="2.5" aria-hidden="true">'+
+    '<path d="M10 10H550V510H10Z"/><path d="M220 10A60 60 0 0 0 340 10"/><path d="M60 510V400A220 220 0 0 1 500 400V510"/>'+
+    '<path d="M205 510V330H355V510"/><path d="M205 330A75 75 0 0 1 355 330"/><path d="M252 488H308" stroke-width="4"/><circle cx="280" cy="474" r="10"/></svg>';
+  return '<div class="lu-court"><div class="lu-courtbox">'+svg+tags+'</div></div>';
+}
+function buildLineup(T,narrow){
+  var o=LIB.opts.lineup, st=starters(T), bench=(T.roster||[]).filter(function(p){ return st.indexOf(p)<0; });
+  var rows=st.map(function(p,i){
+    var ex=[]; if(o.ht&&p.ht) ex.push(esc(p.ht)); if(o.cls&&p.cls) ex.push(esc(/^\d+$/.test(p.cls)?'Grade '+p.cls:p.cls)); if(o.stat&&p.stat) ex.push(esc(p.stat)+' '+esc(o.statLabel));
+    return '<div class="lu-row arow" style="--i:'+i+'"><div class="lu-num"><span>'+esc(p.num)+'</span></div><div class="lu-main"><div class="lu-name">'+esc(p.name)+'</div>'+
+           (ex.length?'<div class="lu-extra">'+ex.join('<i>·</i>')+'</div>':'')+'</div><div class="lu-pos">'+esc(p.pos)+'</div></div>'; }).join('');
+  if(!st.length) rows='<div class="sc-empty">No players yet. Add them in the Library tab.</div>';
+  var benchHtml=(o.bench&&bench.length)?'<div class="lu-bench arow" style="--i:'+st.length+'"><b>BENCH</b>'+bench.map(function(p){ return '<span><em>'+esc(p.num)+'</em>'+esc(p.name)+'</span>'; }).join('')+'</div>':'';
+  var court=(!narrow&&o.court&&st.length)?buildCourt(st):'';
+  return '<div class="gp gp-lineup'+(narrow?' narrow':'')+(court?'':' nocourt')+'" style="'+tvars(T)+'">'+gpHead(logoInner(T),T.name,'Starting lineup',T.record)+
+         '<div class="gp-body"><div class="lu-rows">'+rows+benchHtml+'</div>'+court+'</div></div>';
+}
+function buildSchedule(T){
+  var B=LIB.opts.badge, n=Math.max(3,Math.min(8,+LIB.opts.schedCount||5)), games=(T.schedule||[]).slice(0,n);
+  var rows=games.map(function(g,i){
+    var O=g.opp?teamById(g.opp):null, name=O?(O.short||O.name):(g.name||'TBD'), yt=(g.plat==='YT'), league=(g.type!=='NON-LEAGUE');
+    return '<div class="sc-row arow" style="--i:'+i+'"><div class="sc-match"><span class="sc-ha">'+(g.ha==='at'?'@':'VS')+'</span>'+tlogo(O,name)+'<span class="sc-opp">'+esc(name)+'</span></div>'+
+           '<div class="sc-when"><b>'+esc(g.date)+'</b><span>'+esc(g.time)+'</span></div>'+
+           '<div>'+badge(league?'NYCAL':'NON-LEAGUE',league?B.nycal:B.non)+'</div><div>'+badge(yt?'YT':'USN',yt?B.yt:B.usn)+'</div></div>'; }).join('');
+  if(!games.length) rows='<div class="sc-empty">No games yet. Add them in the Library tab.</div>';
+  return '<div class="gp gp-sched" style="'+tvars(T)+'">'+gpHead(logoInner(T),T.name,'Upcoming schedule',T.record)+
+         '<div class="sc-cols"><span>Matchup</span><span>Date &amp; time</span><span>Game</span><span>Watch</span></div>'+rows+'</div>';
+}
+function buildStandings(){
+  var F=teamById(LIB.sel), rows=LIB.standings||[], W=S.settings.lower, top=rows[0];
+  var num=function(v){ v=parseFloat(v); return isNaN(v)?0:v; };
+  var body=rows.map(function(r,i){
+    var T=r.team?teamById(r.team):null, name=T?(T.short||T.name):(r.name||'Team'), feat=!!(T&&F&&T.id===F.id);
+    var gb=String(r.gb||'').trim();
+    if(!gb&&top){ var d=((num(top.lw)-num(r.lw))+(num(r.ll)-num(top.ll)))/2; gb=(i===0||d<=0)?'—':String(d); }
+    var sk=String(r.streak||'').trim().toUpperCase(), cls=/^W/.test(sk)?' w':/^L/.test(sk)?' l':'';
+    return '<div class="st-row arow'+(feat?' feat':'')+'" style="--i:'+i+(feat?';--pd:'+(0.9+rows.length*0.085).toFixed(2)+'s':'')+'"><div class="st-rank">'+(i+1)+'</div>'+
+           '<div class="st-team">'+tlogo(T,name)+'<span class="st-name">'+esc(name)+'</span></div><div>'+esc(r.lw)+'-'+esc(r.ll)+'</div><div>'+esc(r.ow)+'-'+esc(r.ol)+'</div>'+
+           '<div>'+esc(gb)+'</div><div class="st-strk'+cls+'">'+esc(sk)+'</div></div>'; }).join('');
+  if(!rows.length) body='<div class="sc-empty">No teams yet. Add them in the Library tab.</div>';
+  return '<div class="gp gp-stand" style="'+tvars(F)+';--u1:'+shade(W.logoBg,0.2)+';--u2:'+W.logoBg+'">'+
+         gpHead('<img alt="USN" src="'+USN_LOGO+'">',LIB.opts.standTitle||'Standings','Varsity basketball','',true)+
+         '<div class="st-cols"><span>#</span><span style="text-align:left;padding-left:18px">Team</span><span>League</span><span>Overall</span><span>GB</span><span>Strk</span></div>'+body+'</div>';
+}
+function gfxHtml(key){
+  var H=teamById(LIB.home), A=teamById(LIB.away), F=teamById(LIB.sel);
+  if(key==='lineupHome') return H?buildLineup(H,false):'';
+  if(key==='lineupAway') return A?buildLineup(A,false):'';
+  if(key==='lineupBoth') return '<div class="gp-pair">'+(A?buildLineup(A,true):'')+(H?buildLineup(H,true):'')+'</div>';
+  if(key==='schedule') return F?buildSchedule(F):'';
+  if(key==='standings') return buildStandings();
+  if(key==='halftime') return buildHalftime();
+  return '';
+}
+
+/* ---- putting a graphic on and taking it off ---- */
+var gfxCur='', gfxLast=null, gfxTimer=0;
+function gfxWanted(g){ var k=g&&g.gfx&&g.gfx.show; return GFX.indexOf(k)>=0?k:''; }
+function gfxFill(key){
+  var st=LIB.opts.style, style=(key==='schedule')?st.schedule:(key==='standings')?st.standings:(key==='halftime')?(st.halftime||'slide'):st.lineup, html=gfxHtml(key);
+  el.gfx.dataset.style=style; el.gfx.style.setProperty('--gd',String(1/Math.max(0.4,+LIB.opts.speed||1)));
+  if(html!==gfxLast){ el.gfxPanel.innerHTML=html; gfxLast=html; }
+}
+function syncGfx(){                      // called on every redraw: show, swap, refresh or hide the full-screen graphic
+  var want=gfxWanted(S.game), box=el.gfx, gd=1/Math.max(0.4,+LIB.opts.speed||1);
+  if(want===gfxCur){ if(want) gfxFill(want); return; }
+  var enter=function(){
+    gfxCur=gfxWanted(S.game); gfxLast=null;
+    if(!gfxCur){ el.gfxPanel.innerHTML=''; return; }
+    box.classList.remove('on'); gfxFill(gfxCur); void box.offsetWidth; box.classList.add('on');
+  };
+  clearTimeout(gfxTimer);
+  if(gfxCur){ box.classList.remove('on'); gfxCur='~'; gfxTimer=setTimeout(enter,400*gd); }   // let the old one animate out first
+  else enter();
+}
+
+/* ---- control panel: Graphics tab and Library tab ---- */
+function gfxPanes(){
+  var GB=function(k,label){ return '<button class="btn" data-act="gfx:'+k+'" data-gfx="'+k+'">'+label+keyFor('gfx:'+k)+'</button>'; };
+  var LC=function(path,label){ return '<label class="chk"><input type="checkbox" data-lib="'+path+'">'+label+'</label>'; };
+  var LI=function(path,type,extra){ return '<input type="'+(type||'text')+'" data-lib="'+path+'" '+(extra||'')+'>'; };
+  var LS=function(path){ return '<select data-lib="'+path+'"><option value="slide">Slide</option><option value="wipe">Wipe</option><option value="fade">Fade</option><option value="pop">Pop</option></select>'; };
+  return '<div class="pane" data-pane="gfx">'+
+    '<div class="card"><h3>Show a full-screen graphic</h3><div class="grid g2" style="margin-top:0">'+GB('lineupHome','Lineup: home')+GB('lineupAway','Lineup: away')+
+      GB('lineupBoth','Lineups: both')+GB('schedule','Schedule')+GB('standings','Standings')+GB('halftime','Half-time report')+'<button class="btn warn" data-act="gfx:off">Hide graphic</button></div>'+
+      '<p class="note">One shows at a time. Press the same button or key again to hide it.</p></div>'+
+    '<div class="card"><h3>Which teams</h3><div class="grid" style="margin-top:0">'+F('Featured team: its schedule shows, and it is highlighted in the standings','<select data-libsel="sel"></select>')+'</div>'+
+      '<div class="grid g2">'+F('Lineup: home team','<select data-libsel="home"></select>')+F('Lineup: away team','<select data-libsel="away"></select>')+'</div>'+
+      '<div class="grid">'+B('libToBoard','Put these home and away teams on the scoreboard')+'</div>'+
+      '<p class="note">Teams, rosters, schedules and the standings table are edited in the Library tab.</p></div>'+
+    '<div class="card"><h3>Lineup and schedule options</h3>'+LC('opts.lineup.court','Court diagram beside the list (single-team lineups)')+LC('opts.lineup.bench','Show the bench under the starters')+
+      LC('opts.lineup.ht','Show height')+LC('opts.lineup.cls','Show grade / class')+LC('opts.lineup.stat','Show a stat')+
+      '<div class="grid g2">'+F('Stat label',LI('opts.lineup.statLabel','text','maxlength="6"'))+F('Games on the schedule (3 to 8)',LI('opts.schedCount','number','min="3" max="8" step="1"'))+'</div></div>'+
+    '<div class="card"><h3>Animation</h3><div class="grid g3" style="margin-top:0">'+F('Lineups',LS('opts.style.lineup'))+F('Schedule',LS('opts.style.schedule'))+F('Standings',LS('opts.style.standings'))+F('Half-time',LS('opts.style.halftime'))+'</div>'+
+      '<div class="grid">'+F('Speed (left = slower, right = faster)',LI('opts.speed','range','min="0.5" max="2" step="0.1"'))+'</div>'+
+      LC('opts.hideBug','Hide the scoreboard while a full-screen graphic is showing')+'</div>'+
+    '<div class="card"><h3>Badge colours</h3><div class="grid g4" style="margin-top:0">'+F('NYCAL',LI('opts.badge.nycal','color'))+F('Non-league',LI('opts.badge.non','color'))+
+      F('USN',LI('opts.badge.usn','color'))+F('YT',LI('opts.badge.yt','color'))+'</div></div></div>'+
+
+  '<div class="pane" data-pane="lib">'+
+    '<div class="card"><h3>Saved teams</h3><select id="libEdit" aria-label="Team to edit"></select>'+
+      '<div class="grid g2">'+B('libTeamNew','+ New team','primary')+B('libTeamDel','Delete this team','warn')+'</div>'+
+      '<p class="note">Save every school you play. Their logos then appear in the schedule and standings by themselves.</p></div>'+
+    '<div id="libTeam"></div><div id="libStand"></div>'+
+    '<div class="card">'+B('libReset','Replace the library with the sample data','warn')+
+      '<p class="note">The library is included in Presets → Export to a file, and comes back with Import.</p></div></div>';
+}
+function teamOptions(sel,withOther){
+  return LIB.teams.map(function(t){ return '<option value="'+esc(t.id)+'"'+(t.id===sel?' selected':'')+'>'+esc(t.name||t.short||'Team')+'</option>'; }).join('')+
+         (withOther?'<option value=""'+(sel?'':' selected')+'>Other (type a name)</option>':'');
+}
+function renderLib(){                    // (re)build the Library tab's lists
+  var box=$('#libTeam'); if(!box) return;
+  var T=editTeam(), ti=LIB.teams.indexOf(T), p='teams.'+ti+'.';
+  var V=function(v){ return ' value="'+esc(v)+'"'; };
+  var X=function(path,v,extra){ return '<input type="text" data-lib="'+path+'"'+V(v)+' '+(extra||'')+'>'; };
+  var O=function(path,v,opts,struct){ return '<select data-lib="'+path+'"'+(struct?' data-struct':'')+'>'+opts.map(function(o){ return '<option value="'+o[0]+'"'+(o[0]===v?' selected':'')+'>'+o[1]+'</option>'; }).join('')+'</select>'; };
+  var mv=function(name,i){ return '<button class="btn sm" title="Move up" data-act="'+name+'Move:'+i+':-1">↑</button><button class="btn sm" title="Move down" data-act="'+name+'Move:'+i+':1">↓</button>'+
+                                  '<button class="btn sm warn" title="Remove" data-act="'+name+'Del:'+i+'">✕</button>'; };
+  $('#libEdit').innerHTML=teamOptions(T.id,false);
+  var h='<div class="card"><h3>Team details</h3><div class="grid g2" style="margin-top:0">'+F('Full name',X(p+'name',T.name))+F('Short name (used in tables)',X(p+'short',T.short))+'</div>'+
+    '<div class="grid g2">'+F('Abbreviation (3–4 letters)',X(p+'abbr',T.abbr,'maxlength="4"'))+F('Record',X(p+'record',T.record,'placeholder="6-2"'))+'</div>'+
+    '<div class="grid g2">'+F('Main colour','<input type="color" data-lib="'+p+'color"'+V(T.color)+'>')+F('Second colour','<input type="color" data-lib="'+p+'color2"'+V(T.color2||shade(T.color,SHADE))+'>')+'</div>'+
+    '<div class="grid g2">'+F('Logo (PNG, JPG or SVG)','<input type="file" accept="image/*" data-liblogo>')+'<div class="f">'+(LOGOS.map[T.id]?'Logo saved':'No logo yet')+B('libLogoClear','Remove logo')+'</div></div></div>';
+  h+='<div class="card"><h3>Roster</h3><div class="lr lr-head"><span>#</span><span>Name</span><span>Pos</span><span>Ht</span><span>Class</span><span>Stat</span><span title="Starter">St</span><span></span></div>'+
+    T.roster.map(function(r,i){ var q=p+'roster.'+i+'.';
+      return '<div class="lr">'+X(q+'num',r.num,'maxlength="3"')+X(q+'name',r.name)+O(q+'pos',r.pos,[['G','G'],['F','F'],['C','C']])+X(q+'ht',r.ht)+X(q+'cls',r.cls)+X(q+'stat',r.stat)+
+             '<input type="checkbox" title="Starter" data-lib="'+q+'st"'+(r.st?' checked':'')+'><button class="btn sm warn" title="Remove" data-act="libRosterDel:'+i+'">✕</button></div>'; }).join('')+
+    '<div class="grid">'+B('libRosterAdd','+ Add player')+'</div><p class="note">Tick St for the five starters. Everyone else is the bench.</p></div>';
+  h+='<div class="card"><h3>Schedule</h3>'+
+    T.schedule.map(function(g,i){ var q=p+'schedule.'+i+'.';
+      return '<div class="lg"><div class="lg1">'+O(q+'ha',g.ha,[['vs','VS'],['at','@']])+'<select data-lib="'+q+'opp" data-struct>'+teamOptions(g.opp,true)+'</select>'+mv('libGame',i)+'</div>'+
+             '<div class="lg2">'+(g.opp?'':X(q+'name',g.name,'placeholder="Opponent name"'))+X(q+'date',g.date,'placeholder="FRI NOV 20"')+X(q+'time',g.time,'placeholder="7:00 PM"')+
+             O(q+'type',g.type,[['NYCAL','NYCAL'],['NON-LEAGUE','Non-league']])+O(q+'plat',g.plat,[['USN','USN'],['YT','YT']])+'</div></div>'; }).join('')+
+    '<div class="grid">'+B('libGameAdd','+ Add game')+'</div><p class="note">The graphic shows games from the top of this list, so keep the next game first.</p></div>';
+  box.innerHTML=h;
+  var s='<div class="card"><h3>Standings table</h3><div class="grid" style="margin-top:0">'+F('Title',X('opts.standTitle',LIB.opts.standTitle))+'</div>'+
+    LIB.standings.map(function(r,i){ var q='standings.'+i+'.';
+      return '<div class="lg"><div class="lg1 st"><span class="rk">'+(i+1)+'</span><select data-lib="'+q+'team" data-struct>'+teamOptions(r.team,true)+'</select>'+mv('libStand',i)+'</div>'+
+             '<div class="lg2">'+(r.team?'':X(q+'name',r.name,'placeholder="Team name"'))+X(q+'lw',r.lw,'placeholder="Lg W" title="League wins"')+X(q+'ll',r.ll,'placeholder="Lg L" title="League losses"')+
+             X(q+'ow',r.ow,'placeholder="W" title="Overall wins"')+X(q+'ol',r.ol,'placeholder="L" title="Overall losses"')+X(q+'gb',r.gb,'placeholder="GB" title="Games back (leave empty to work it out)"')+
+             X(q+'streak',r.streak,'placeholder="W3" title="Streak"')+'</div></div>'; }).join('')+
+    '<div class="grid g2">'+B('libStandAdd','+ Add team')+B('libStandSort','Sort by league record')+'</div>'+
+    '<p class="note">Boxes are: league wins, league losses, overall wins, overall losses, games back, streak. Leave games back empty and it is worked out for you.</p></div>';
+  $('#libStand').innerHTML=s;
+}
+function syncLibUI(structural){          // keep the two tabs in step with the library
+  if(!isAuthority||!el.panel.firstChild) return;
+  var f=document.activeElement, inEditor=f&&f.closest&&(f.closest('#libTeam')||f.closest('#libStand'));
+  if(structural&&!(inEditor&&f.tagName==='INPUT'&&f.type==='text')) renderLib();
+  $$('[data-lib]',el.panel).forEach(function(n){ if(n===f) return; var v=getPath(LIB,n.dataset.lib); if(v===undefined) return;
+    if(n.type==='checkbox') n.checked=!!v; else if(String(n.value)!==String(v)) n.value=v; });
+  $$('[data-libsel]',el.panel).forEach(function(n){ if(n===f) return; n.innerHTML=teamOptions(LIB[n.dataset.libsel],false); });
+  var e=$('#libEdit'); if(e&&e!==f) e.innerHTML=teamOptions(editTeam().id,false);
+}
+function libInput(t){
+  var v;
+  if(t.type==='checkbox') v=t.checked;
+  else if(t.type==='number'||t.type==='range'){ v=parseFloat(t.value); if(isNaN(v)) return; if(t.min!=='') v=Math.max(+t.min,v); if(t.max!=='') v=Math.min(+t.max,v); }
+  else v=t.value;
+  libCommit(function(L){ setPath(L,t.dataset.lib,v); },t.dataset.struct!==undefined);
+}
+function readLibLogo(file,input){
+  if(!file) return;
+  var id=editTeam().id, fr=new FileReader();
+  fr.onload=function(){
+    var raw=fr.result, img=new Image();
+    img.onload=function(){
+      var w=img.naturalWidth, h=img.naturalHeight, out=raw;
+      if(w&&h){ var k=Math.min(1,220/Math.max(w,h)), c=document.createElement('canvas'); c.width=Math.max(1,Math.round(w*k)); c.height=Math.max(1,Math.round(h*k));
+        try{ c.getContext('2d').drawImage(img,0,0,c.width,c.height); out=c.toDataURL('image/png'); }catch(e){ out=raw; } }
+      if(out.length>600000){ toast('That image is too big. Try a smaller one.'); return; }
+      libCommit(function(){ LOGOS.map[id]=out; },true,true); if(input) input.value='';
+    };
+    img.onerror=function(){ toast('Could not read that image'); };
+    img.src=raw;
+  };
+  fr.readAsDataURL(file);
+}
+function moveItem(arr,i,d){ i=+i; var j=i+(+d); if(j<0||j>=arr.length) return; var x=arr[i]; arr[i]=arr[j]; arr[j]=x; }
+var LIBACT={
+  gfx:function(k){ commit(function(st,g){ g.gfx.show=(k==='off'||g.gfx.show===k)?'':k; }); },
+  libTeamNew:function(){ var id=uid(); libEditId=id;
+    libCommit(function(L){ L.teams.push({id:id,name:'New team',short:'New',abbr:'NEW',record:'',color:'#334155',color2:shade('#334155',SHADE),roster:[],schedule:[]}); },true); },
+  libTeamDel:function(btn){ twoStep(btn,function(){
+    if(LIB.teams.length<=1){ toast('Keep at least one team'); return; }
+    var T=editTeam(), id=T.id, label=T.short||T.name;
+    libCommit(function(L){
+      L.teams=L.teams.filter(function(t){ return t.id!==id; });
+      ['sel','home','away'].forEach(function(k){ if(L[k]===id) L[k]=L.teams[0].id; });
+      L.teams.forEach(function(t){ t.schedule.forEach(function(g){ if(g.opp===id){ g.opp=''; g.name=label; } }); });   // keep the name where it was used
+      L.standings.forEach(function(r){ if(r.team===id){ r.team=''; r.name=label; } });
+      delete LOGOS.map[id];
+    },true,true);
+    toast('Team deleted');
+  }); },
+  libLogoClear:function(){ var id=editTeam().id; libCommit(function(){ delete LOGOS.map[id]; },true,true); },
+  libRosterAdd:function(){ libCommit(function(){ var r=editTeam().roster; r.push({num:'',name:'',pos:'G',ht:'',cls:'',stat:'',st:r.filter(function(p){ return p.st; }).length<5}); },true); },
+  libRosterDel:function(i){ libCommit(function(){ editTeam().roster.splice(+i,1); },true); },
+  libGameAdd:function(){ libCommit(function(){ editTeam().schedule.push({opp:'',name:'',ha:'vs',date:'',time:'',type:'NYCAL',plat:'USN'}); },true); },
+  libGameDel:function(i){ libCommit(function(){ editTeam().schedule.splice(+i,1); },true); },
+  libGameMove:function(i,d){ libCommit(function(){ moveItem(editTeam().schedule,i,d); },true); },
+  libStandAdd:function(){ libCommit(function(L){ L.standings.push({team:'',name:'',lw:'0',ll:'0',ow:'0',ol:'0',gb:'',streak:''}); },true); },
+  libStandDel:function(i){ libCommit(function(L){ L.standings.splice(+i,1); },true); },
+  libStandMove:function(i,d){ libCommit(function(L){ moveItem(L.standings,i,d); },true); },
+  libStandSort:function(){ libCommit(function(L){
+    var n=function(v){ v=parseFloat(v); return isNaN(v)?0:v; }, pct=function(w,l){ w=n(w); l=n(l); return (w+l)?w/(w+l):0; };
+    L.standings.sort(function(a,b){ return (pct(b.lw,b.ll)-pct(a.lw,a.ll))||(n(b.lw)-n(a.lw))||(pct(b.ow,b.ol)-pct(a.ow,a.ol)); });
+  },true); },
+  libReset:function(btn){ twoStep(btn,function(){ var s=sampleLib(); libEditId=s.sel;
+    libCommit(function(){ LIB=s; LOGOS.map={}; },true,true); toast('Sample data loaded'); }); },
+  libToBoard:function(){                 // copy the two lineup teams into the scoreboard's home / away slots
+    commit(function(st){ [['home',LIB.home],['away',LIB.away]].forEach(function(x){ var T=teamById(x[1]); if(!T) return; var s=st.teams[x[0]];
+      s.name=T.short||T.name; s.abbr=T.abbr||(T.short||T.name).slice(0,4).toUpperCase(); s.record=T.record||''; s.color=T.color; s.color2=T.color2||shade(T.color,SHADE); s.logo=LOGOS.map[T.id]||''; }); });
+    toast('Scoreboard teams updated');
+  }
+};
+Object.keys(LIBACT).forEach(function(k){ ACT[k]=LIBACT[k]; });
+(function(){ var l=document.createElement('link'); l.rel='stylesheet'; l.href='https://fonts.googleapis.com/css2?family=Barlow:wght@500;600;700&display=swap'; document.head.appendChild(l); })();   // clean sans for small details
+
+/* ============================================================
+   12. STATS AND HALF-TIME REPORT
+   One person logs each play with one tap in the Stats tab. The
+   page works out points, percentages and possession by
+   itself, and builds a half-time report with talking points.
+
+   Everything lives in game.st, so it travels with the score to the
+   other windows and the remote room, and resets with New game.
+   Possession rules: made shot or turnover -> ball to the other team.
+   After a miss the ball stays put until someone taps Switch (or a
+   team's button) for the rebound.
+   Possession time is counted in game-clock time, not real time.
+   ============================================================ */
+function freshTeamStats(){ return {fg2m:0,fg2a:0,fg3m:0,fg3a:0,ftm:0,fta:0,oreb:0,dreb:0,ast:0,stl:0,blk:0,to:0,pf:0,tol:0}; }
+function freshStats(){ return {home:freshTeamStats(),away:freshTeamStats(),poss:{team:'',rem:0,per:1,nhome:0,naway:0,mshome:0,msaway:0},last:''}; }
+
+var STAT={                               // what each button records
+  m2:{lab:'made 2',     f:['fg2m','fg2a'], pts:2, poss:'opp'},
+  x2:{lab:'missed 2',   f:['fg2a']},
+  m3:{lab:'made 3',     f:['fg3m','fg3a'], pts:3, poss:'opp'},
+  x3:{lab:'missed 3',   f:['fg3a']},
+  mf:{lab:'made free throw',   f:['ftm','fta'], pts:1, poss:'opp'},
+  xf:{lab:'missed free throw', f:['fta']},
+  as:{lab:'assist',     f:['ast']},
+  to:{lab:'turnover',   f:['to'],  poss:'opp'},
+  pf:{lab:'foul',       f:['pf']},
+  tm:{lab:'timeout',    f:['tol']}
+};
+function pct(m,a){ return a?Math.round(m*100/a):null; }
+function derive(s){
+  var fgm=s.fg2m+s.fg3m, fga=s.fg2a+s.fg3a;
+  return {pts:s.fg2m*2+s.fg3m*3+s.ftm, fgm:fgm, fga:fga, fgp:pct(fgm,fga), tpm:s.fg3m, tpa:s.fg3a, tpp:pct(s.fg3m,s.fg3a),
+          ftm:s.ftm, fta:s.fta, ftp:pct(s.ftm,s.fta), reb:s.oreb+s.dreb, oreb:s.oreb, dreb:s.dreb,
+          ast:s.ast, stl:s.stl, blk:s.blk, to:s.to, pf:s.pf};
+}
+function mmss(ms){ var s=Math.round(ms/1000); return Math.floor(s/60)+':'+('0'+(s%60)).slice(-2); }
+function halfPer(){ var n=S.settings.rules.periods; return n%2===0?n/2:Math.ceil(n/2); }
+
+/* ---- possession ---- */
+function possFlush(g){                  // add the time since the last change to whoever had the ball
+  var P=g.st.poss, r=rem(g.clock);
+  if(P.team) P['ms'+P.team]+=possSince(g,r);
+  P.rem=r; P.per=g.period;
+}
+function possSince(g,r){                // game-clock time since the last change (across a period break, if any)
+  var P=g.st.poss;
+  if(P.per===g.period) return Math.max(0,P.rem-r);
+  return Math.max(0,P.rem)+Math.max(0,periodLen(S.settings.rules,g.period)-r);   // rest of the old period + time used in this one
+}
+function possSet(g,team){
+  var P=g.st.poss; if(TEAMS.indexOf(team)<0) return;
+  possFlush(g);
+  if(P.team!==team) P['n'+team]++;       // a new possession only when the ball changes hands
+  P.team=team;
+  if(S.settings.stats.arrow) g.possession=team;
+}
+function possMs(g){                     // possession time so far, including the possession happening now
+  var P=g.st.poss, out={home:P.mshome,away:P.msaway};
+  if(P.team) out[P.team]+=possSince(g,rem(g.clock));
+  return out;
+}
+
+/* ---- undo: snapshots of what a stat tap can change (this device only) ---- */
+var statUndo=[];
+function pushUndo(){
+  var g=S.game; statUndo.push(clone({st:g.st,score:g.score,fouls:g.fouls,timeouts:g.timeouts,possession:g.possession}));
+  if(statUndo.length>80) statUndo.shift();
+}
+
+/* ---- talking points ---- */
+function talkingPoints(){
+  var g=S.game, T=S.settings.teams, d={home:derive(g.st.home),away:derive(g.st.away)}, pm=possMs(g), tot=pm.home+pm.away, out=[];
+  var nm=function(t){ return T[t].name||T[t].abbr||(t==='home'?'Home':'Away'); };
+  var add=function(score,text){ out.push({s:score,t:text}); };
+  var sa=g.score.away, sh=g.score.home;
+  if(sa!==sh){ var L=sa>sh?'away':'home', df=Math.abs(sa-sh); add(50+df, nm(L)+' leads by '+df+', '+Math.max(sa,sh)+'–'+Math.min(sa,sh)+'.'); }
+  else if(sa+sh>0) add(60,'All square at '+sa+'–'+sh+'.');
+  TEAMS.forEach(function(t){
+    var x=d[t], y=d[other(t)], n=nm(t), o=nm(other(t));
+    if(x.fga>=6&&y.fga>=6&&x.fgp-y.fgp>=10) add(40+(x.fgp-y.fgp), n+' is shooting '+x.fgp+'% from the field ('+x.fgm+'-of-'+x.fga+'), '+o+' '+y.fgp+'%.');
+    if(x.tpm>=3) add(25+x.tpm*5, n+' has hit '+x.tpm+' threes ('+x.tpm+'-of-'+x.tpa+').');
+    if(x.to>=5&&x.to-y.to>=3) add(30+(x.to-y.to)*4, n+' has '+x.to+' turnovers to '+o+'’s '+y.to+'.');
+    if(x.fta>=6) add(20+x.fta, n+' is '+x.ftm+'-of-'+x.fta+' at the free-throw line.');
+    if(x.ast>=5&&x.fgm>0) add(20+x.ast*2, n+' has '+x.ast+' assists on '+x.fgm+' made baskets.');
+    if(tot>=120000){ var sp=Math.round(pm[t]*100/tot); if(sp>=58) add(25+(sp-50), n+' has had the ball '+sp+'% of the time.'); }
+    if(g.fouls[other(t)]>=S.settings.rules.bonusAt) add(18, n+' is in the bonus.');
+  });
+  out.sort(function(a,b){ return b.s-a.s; });
+  return out.map(function(o){ return o.t; });
+}
+
+/* ---- the half-time report graphic ---- */
+function buildHalftime(){
+  var g=S.game, T=S.settings.teams, W=S.settings.lower, d={home:derive(g.st.home),away:derive(g.st.away)}, pm=possMs(g), tot=pm.home+pm.away;
+  var acc=function(t){ var c=T[t].color; return lum(c)<0.16?shade(c,0.4):c; };
+  var logo=function(t){ var X=T[t]; return '<div class="tlogo" style="--lc:'+X.color+';--lc2:'+X.color2+';--ltx:'+contrast(X.color)+'">'+
+    (X.logo?'<img alt="" src="'+esc(X.logo)+'">':'<span class="mono">'+esc(((X.abbr||X.name||'?').trim().charAt(0)||'?').toUpperCase())+'</span>')+'</div>'; };
+  var cell=function(t,side){ var X=T[t]; return '<div class="ht-team '+side+'" style="--c1:'+X.color+';--c2:'+X.color2+';--tx:'+contrast(X.color)+'">'+logo(t)+'<span class="ht-name">'+esc(X.name||X.abbr)+'</span></div>'; };
+  var cnt=function(k){ var a=d.away[k], h=d.home[k], m=Math.max(a,h,1); return [{t:a,w:a*100/m},{t:h,w:h*100/m}]; };
+  var shoot=function(m,a,p){ return [{t:d.away[m]+'-'+d.away[a],s:d.away[p]==null?'':d.away[p]+'%',w:d.away[p]||0},{t:d.home[m]+'-'+d.home[a],s:d.home[p]==null?'':d.home[p]+'%',w:d.home[p]||0}]; };
+  var sa=tot?Math.round(pm.away*100/tot):0, sh=tot?100-sa:0;
+  var rows=[['Field goals',shoot('fgm','fga','fgp')],['3-pointers',shoot('tpm','tpa','tpp')],['Free throws',shoot('ftm','fta','ftp')],
+            ['Assists',cnt('ast')],['Turnovers',cnt('to')],['Fouls',cnt('pf')],
+            ['Possession',[{t:tot?sa+'%':'–',s:mmss(pm.away),w:sa},{t:tot?sh+'%':'–',s:mmss(pm.home),w:sh}]]];
+  var body=rows.map(function(r,i){ var L=r[1][0], R=r[1][1];
+    return '<div class="ht-row arow" style="--i:'+(i+1)+'"><div class="ht-v">'+esc(L.t)+(L.s?'<small>'+esc(L.s)+'</small>':'')+'</div>'+
+      '<div class="ht-bar l" style="--bc:'+acc('away')+'"><b style="width:'+Math.round(L.w)+'%"></b></div><div class="ht-lab">'+r[0]+'</div>'+
+      '<div class="ht-bar r" style="--bc:'+acc('home')+'"><b style="width:'+Math.round(R.w)+'%"></b></div>'+
+      '<div class="ht-v r">'+(R.s?'<small>'+esc(R.s)+'</small>':'')+esc(R.t)+'</div></div>'; }).join('');
+  var tp=S.settings.stats.keys?talkingPoints().slice(0,2):[];
+  var keys=tp.length?'<div class="ht-keys arow" style="--i:'+(rows.length+1)+'">'+tp.map(function(x){ return '<div><b>KEY</b><span>'+esc(x)+'</span></div>'; }).join('')+'</div>':'';
+  return '<div class="gp gp-ht" style="'+tvars({color:W.logoBg,color2:shade(W.logoBg,SHADE)})+';--u1:'+shade(W.logoBg,0.2)+';--u2:'+W.logoBg+'">'+
+    gpHead('<img alt="USN" src="'+USN_LOGO+'">','Halftime report','Varsity basketball','',true)+
+    '<div class="ht-top arow" style="--i:0">'+cell('away','l')+'<div class="ht-score"><span>'+g.score.away+'</span><i>–</i><span>'+g.score.home+'</span></div>'+cell('home','r')+'</div>'+
+    '<div class="ht-rows">'+body+'</div>'+keys+'</div>';
+}
+
+/* ---- automatic half-time: put the report up a few seconds after the half ends ---- */
+function halfCheck(){
+  if(!S.settings.stats.auto) return;
+  var p=S.game.period; if(p!==halfPer()||S.game.final) return;
+  setTimeout(function(){ var g=S.game;
+    if(g.period===p&&!g.clock.running&&rem(g.clock)<=0&&gfxWanted(g)!=='halftime') commit(function(st,gg){ gg.gfx.show='halftime'; });
+  },4000);
+}
+
+/* ---- buttons ---- */
+var STATACT={
+  stat:function(t,k){
+    var D=STAT[k]; if(!D||TEAMS.indexOf(t)<0) return;
+    pushUndo();
+    commit(function(st,g){
+      var s=g.st[t];
+      D.f.forEach(function(f){ s[f]++; });
+      if(D.pts&&st.stats.score){ g.score[t]+=D.pts; fx(g,'score',t,D.pts); }
+      if(k==='pf'&&st.stats.fouls) g.fouls[t]++;
+      if(k==='tm'){ if(g.timeouts[t]>0) g.timeouts[t]--; freeze(g.clock); freeze(g.shot); fx(g,'timeout',t); }
+      if(D.poss==='opp') possSet(g,other(t)); else if(D.poss==='self') possSet(g,t);
+      g.st.last=(st.teams[t].abbr||st.teams[t].name)+' '+D.lab;
+    });
+  },
+  possTo:function(t){ pushUndo(); commit(function(st,g){ possSet(g,t); g.st.last='Ball to '+(st.teams[t].abbr||t); }); },
+  possFlip:function(){ var t=S.game.st.poss.team?other(S.game.st.poss.team):'home'; ACT.possTo(t); },
+  statUndo:function(){
+    if(!statUndo.length){ toast('Nothing to undo on this device'); return; }
+    var u=statUndo.pop(), was=S.game.st.last;
+    commit(function(st,g){ g.st=u.st; g.score=u.score; g.fouls=u.fouls; g.timeouts=u.timeouts; g.possession=u.possession; });
+    toast('Undone: '+(was||'last tap'));
+  },
+  statsReset:function(btn){ twoStep(btn,function(){ statUndo=[]; commit(function(st,g){ g.st=freshStats(); }); toast('Stats reset'); }); }
+};
+Object.keys(STATACT).forEach(function(k){ ACT[k]=STATACT[k]; });
+(function(){                            // close the possession clock when a period is ended early with Next period
+  var next=ACT.nextPeriod;
+  ACT.nextPeriod=function(){ commit(function(st,g){ possFlush(g); g.st.poss.rem=0; }); next(); };
+})();
+
+/* ---- the Stats tab ---- */
+function statsPane(){
+  var SB=function(t,k,label,cls){ return '<button class="btn stb '+(cls||'')+'" data-act="stat:'+t+':'+k+'">'+label+'</button>'; };
+  var team=function(t){ return '<div class="card tcard"><div class="thead" data-head="'+t+'"><span data-out="teams.'+t+'.name"></span><span class="side">'+t.toUpperCase()+'</span></div><div class="body">'+
+    '<div class="grid g2" style="margin-top:0">'+SB(t,'m2','2PT ✓','mk')+SB(t,'x2','2PT ✗')+SB(t,'m3','3PT ✓','mk')+SB(t,'x3','3PT ✗')+SB(t,'mf','FT ✓','mk')+SB(t,'xf','FT ✗')+'</div>'+
+    '<div class="grid g2">'+SB(t,'as','Assist')+SB(t,'to','Turnover')+SB(t,'pf','Foul','warn')+SB(t,'tm','Timeout')+'</div>'+
+    '<div class="stline" data-stline="'+t+'"></div></div></div>'; };
+  return '<div class="pane" data-pane="stats">'+
+    '<div class="card"><div class="lbl">Who has the ball</div>'+
+      '<div class="grid g3" style="margin-top:6px"><button class="btn" data-act="possTo:home" data-possto="home"></button><button class="btn" data-act="possFlip">⇄ Switch</button><button class="btn" data-act="possTo:away" data-possto="away"></button></div>'+
+      '<div class="stposs" data-live="stPoss"></div>'+
+      '<div class="inline"><button class="btn primary" data-act="statUndo">↶ Undo last tap</button><span class="note" style="margin:0;align-self:center" data-live="stLast"></span></div></div>'+
+    '<div class="teams2">'+team('home')+team('away')+'</div>'+
+    '<div class="card"><h3>Half-time report</h3><div class="grid g2" style="margin-top:0"><button class="btn" data-act="gfx:halftime" data-gfx="halftime">Show report'+keyFor('gfx:halftime')+'</button><button class="btn warn" data-act="gfx:off">Hide graphic</button></div>'+
+      '<h3 style="margin-top:14px">Talking points for the commentators</h3><ol class="tp" data-live="stTalk"></ol>'+
+      C('stats.auto','Put the report on air by itself when the first half ends')+C('stats.keys','Show the top two talking points on the report')+
+      C('stats.score','Made shots add to the scoreboard score')+C('stats.fouls','Fouls add to the scoreboard team fouls')+C('stats.arrow','Scoreboard possession arrow follows the ball')+
+      '<p class="note">Made shots and turnovers give the ball to the other team. After a miss, tap Switch (or the team\'s button above) when the other team gets the rebound. Undo only reverses taps made on this device.</p></div>'+
+    '<div class="card">'+B('statsReset','Reset all stats','warn')+'<p class="note">New game also resets the stats.</p></div></div>';
+}
+function statsPossLine(){
+  var o=panelOut; if(!o.stPoss) return;
+  var g=S.game, T=S.settings.teams, P=g.st.poss, pm=possMs(g), tot=pm.home+pm.away;
+  var nm=function(t){ return T[t].abbr||T[t].name; };
+  o.stPoss.textContent='Possessions: '+nm('home')+' '+P.nhome+' · '+nm('away')+' '+P.naway+'   |   Time with the ball: '+
+    nm('home')+' '+mmss(pm.home)+(tot?' ('+Math.round(pm.home*100/tot)+'%)':'')+' · '+nm('away')+' '+mmss(pm.away)+(tot?' ('+Math.round(pm.away*100/tot)+'%)':'');
+}
+function syncStats(){                   // called from syncPanel on every change
+  var o=panelOut; if(!o.stPoss) return;
+  var g=S.game, T=S.settings.teams, P=g.st.poss;
+  TEAMS.forEach(function(t){
+    var x=derive(g.st[t]), n=$('[data-stline="'+t+'"]',el.panel); if(!n) return;
+    var warn=(S.settings.stats.score&&x.pts!==g.score[t])?' <em>(scoreboard says '+g.score[t]+')</em>':'';
+    n.innerHTML='PTS '+x.pts+warn+' · FG '+x.fgm+'-'+x.fga+(x.fgp==null?'':' ('+x.fgp+'%)')+' · 3PT '+x.tpm+'-'+x.tpa+' · FT '+x.ftm+'-'+x.fta+
+      '<br>AST '+x.ast+' · TO '+x.to+' · PF '+x.pf;
+  });
+  $$('[data-possto]',el.panel).forEach(function(n){ var t=n.dataset.possto; n.textContent=(P.team===t?'● ':'')+(T[t].abbr||T[t].name); n.classList.toggle('on',P.team===t); });
+  statsPossLine();
+  o.stLast.textContent=g.st.last?'Last: '+g.st.last:'';
+  var tp=talkingPoints();
+  o.stTalk.innerHTML=tp.length?tp.slice(0,5).map(function(x){ return '<li>'+esc(x)+'</li>'; }).join(''):'<li>Log a few plays and talking points appear here.</li>';
+}
+setInterval(function(){ if(isAuthority&&S.game.clock.running) statsPossLine(); },500);
+
+/* ============================================================
+   13. COUNTDOWN SCREEN (off air)
+   Pregame: both teams + "Tip-off in". Halftime: a HALFTIME band,
+   both scores (taken from the Game tab) + "3rd quarter starts in".
+   It takes the scorebug's spot and look; while it is on air the
+   scorebug steps aside.
+   The countdown is a clock like the game clock (game.cd, same
+   maths), so it runs on every window and the phone, and it stops
+   and holds at 0:00.
+     length      -> set:  ms = length, waits for Start
+     clock time  -> target: counts to that time of day, starts at once
+   ============================================================ */
+var cdEl={box:$('#cd'), teams:$('#cdTeams'), bar:$('#cdBar'), inner:$('#cdIn'), lab:$('#cdLab'), time:$('#cdTime')}, cdTeam={};
+['away','home'].forEach(function(t){         // away on the left, home on the right; the scores meet in the middle
+  var c=document.createElement('div'); c.className='cd-team'+(t==='home'?' r':'');
+  c.innerHTML='<div class="logo"><img alt=""><span class="mono"></span></div>'+
+    '<div class="cd-names"><span class="cd-abbr"></span><span class="cd-rec"></span></div><div class="cd-score">0</div>';
+  cdEl.teams.appendChild(c);
+  cdTeam[t]={cell:c, logo:$('.logo',c), img:$('img',c), mono:$('.mono',c), names:$('.cd-names',c),
+             abbr:$('.cd-abbr',c), rec:$('.cd-rec',c), score:$('.cd-score',c)};
+});
+
+function cdLabel(m){
+  if(m!=='half') return 'Tip-off in';
+  return periodLabel(halfPer()+1).toLowerCase()+' '+unitName().toLowerCase()+' starts in';   // "3rd quarter starts in" (or "2nd half")
+}
+function cdShown(g){                     // is the countdown screen on screen?
+  if(!g||!g.cd||!g.cd.show) return false;
+  if(gfxWanted(g)&&LIB.opts.hideBug) return false;         // a full-screen graphic is up
+  var K=S.settings.look;
+  return clearOfLower(g,730*K.scale,(cdEl.box.offsetHeight||212)*K.scale);
+}
+function cdFit(){                        // squeeze long names so they never overflow
+  TEAMS.forEach(function(t){ var r=cdTeam[t]; r.abbr.style.transform='';
+    var avail=r.names.clientWidth-14, w=r.abbr.offsetWidth;
+    if(avail>0&&w>avail) r.abbr.style.transform='scaleX('+(avail/w)+')'; });
+  cdBarFit();
+}
+function cdBarFit(){                     // shrink the label + time together if they would not fit (e.g. 1:29:08)
+  var i=cdEl.inner; i.style.transform='';
+  var avail=cdEl.bar.clientWidth-44, w=i.offsetWidth;
+  if(avail>0&&w>avail) i.style.transform='scale('+(avail/w)+')';
+}
+function cdIntro(){
+  if(!S.settings.anim.intro) return;
+  retrigger(cdEl.box,'intro');
+  clearTimeout(cdIntro.t); cdIntro.t=setTimeout(function(){ cdEl.box.classList.remove('intro'); },1500*D());
+}
+function applyCountdown(oldGame){
+  var st=S.settings, L=st.look, g=S.game, C=g.cd;
+  cdEl.box.classList.toggle('gloss',!!L.gloss);
+  cdEl.box.classList.toggle('half',C.mode==='half');
+  TEAMS.forEach(function(t){
+    var T=st.teams[t], r=cdTeam[t], s=r.cell.style;
+    s.setProperty('--c1',T.color); s.setProperty('--c1d',shade(T.color,-0.2)); s.setProperty('--c2',T.color2);
+    s.setProperty('--tx',contrast(T.color)); s.setProperty('--tx2',contrast(T.color2));
+    r.abbr.textContent=(L.label==='name'?T.name:T.abbr)||'';
+    if(T.logo){ if(r.img.getAttribute('src')!==T.logo) r.img.src=T.logo; r.img.hidden=false; r.mono.hidden=true; }
+    else{ r.img.hidden=true; r.img.removeAttribute('src'); r.mono.hidden=false;
+          r.mono.textContent=((T.abbr||T.name||'?').trim().charAt(0)||'?').toUpperCase(); }
+    r.logo.classList.toggle('badge',!!L.badge||!T.logo);
+    r.rec.textContent=(L.showRecord&&T.record)?'('+T.record.replace(/^\(|\)$/g,'')+')':'';
+    r.rec.hidden=!r.rec.textContent;
+    r.score.textContent=g.score[t];
+  });
+  cdEl.lab.textContent=cdLabel(C.mode);
+  cdFit();
+  var vis=cdShown(g), was=oldGame?cdShown(oldGame):false;
+  cdEl.box.classList.toggle('off',!vis);
+  if(vis&&(!was||(oldGame&&oldGame.cd&&oldGame.cd.mode!==C.mode))) cdIntro();   // play in when it appears or changes screen
+  lastCdText=null;
+}
+
+/* ---- the clock ---- */
+var lastCdText=null;
+function fmtCount(ms){                   // 14:59, or 1:05:00 past an hour; whole seconds, never below 0:00
+  var s=Math.ceil(Math.max(0,ms)/1000), h=Math.floor(s/3600), m=Math.floor(s%3600/60), x=('0'+(s%60)).slice(-2);
+  return h?h+':'+('0'+m).slice(-2)+':'+x:m+':'+x;
+}
+function cdTick(){                       // called from the 60fps loop
+  var r=rem(S.game.cd), t=fmtCount(r);
+  if(t===lastCdText) return;
+  var refit=!lastCdText||lastCdText.length!==t.length;
+  lastCdText=t; setDigits(cdEl.time,t); cdEl.time.classList.toggle('zero',r<=0);
+  if(refit) cdBarFit();
+  if(panelOut.cdTime){ panelOut.cdTime.textContent=t; syncCountdown(); }
+}
+setInterval(function(){                  // the control side records that the countdown has reached 0:00 and holds it there
+  if(!isAuthority) return;
+  var C=S.game.cd;
+  if(C.running&&rem(C)<=0) commit(function(st,g){ g.cd.running=false; g.cd.ms=0; g.cd.t0=0; });
+},100);
+
+function parseLength(txt){               // "15:00", "15" (minutes), "1:05:00", "90s"  ->  milliseconds (or null)
+  txt=String(txt||'').trim().toLowerCase(); if(!txt) return null;
+  var m;
+  if((m=txt.match(/^(\d+):(\d{1,2}):(\d{1,2})$/))) return ((+m[1])*3600+(+m[2])*60+(+m[3]))*1000;
+  if((m=txt.match(/^(\d+(?:\.\d+)?)\s*(m|min|mins|minutes)?$/))) return Math.round(parseFloat(m[1])*60000);
+  if((m=txt.match(/^(\d+)\s*(s|sec|secs|seconds)$/))) return (+m[1])*1000;
+  return parseClock(txt);
+}
+function parseTarget(txt){               // "4:30 PM", "4:30pm", "16:30", "4:30" -> the next time the clock shows that (real time, ms)
+  var m=String(txt||'').trim().toLowerCase().replace(/\./g,'').match(/^(\d{1,2})(?:[:h]?(\d{2}))?\s*(am|pm|a|p)?$/);
+  if(!m) return null;
+  var h=+m[1], mi=m[2]?+m[2]:0, ap=m[3]?m[3].charAt(0):'', hours;
+  if(mi>59||h>23) return null;
+  if(ap){ if(h<1||h>12) return null; hours=[(h%12)+(ap==='p'?12:0)]; }
+  else if(h===0||h>12) hours=[h];
+  else hours=[h%12,(h%12)+12];                 // no AM/PM: whichever comes next
+  var d=new Date(), t0=Date.now(), best=null;
+  [0,1].forEach(function(day){ hours.forEach(function(hh){
+    var t=new Date(d.getFullYear(),d.getMonth(),d.getDate()+day,hh,mi,0,0).getTime();
+    if(t>t0&&(best===null||t<best)) best=t; }); });
+  if(best===null||best-t0>12*3600000) return -1;   // more than 12 hours away: almost certainly a time that has passed today
+  return best;
+}
+function cdTargetText(C){                // the clock time a countdown is aimed at, in this computer's time
+  return new Date(C.target-timeOffset).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});
+}
+
+/* ---- buttons ---- */
+var CDACT={
+  cdShow:function(){ commit(function(st,g){ g.cd.show=!g.cd.show; }); },
+  cdMode:function(m){ commit(function(st,g){ g.cd.mode=(m==='pre'||m==='half')?m:(g.cd.mode==='half'?'pre':'half'); }); },
+  cdStart:function(){
+    var C=S.game.cd;
+    if(C.running) return;
+    if((C.target?C.target-now():rem(C))<=0){ toast('The countdown is at 0:00. Set a new time first.'); return; }
+    commit(function(st,g){ var c=g.cd; if(c.target) c.ms=Math.max(0,c.target-now()); run(c); });
+  },
+  cdPause:function(){ commit(function(st,g){ freeze(g.cd); }); },
+  cdReset:function(){ commit(function(st,g){ var c=g.cd;
+    if(c.target){ c.ms=Math.max(0,c.target-now()); c.running=false; run(c); }   // back to counting to the clock time
+    else { c.ms=c.set; c.running=false; c.t0=0; }                                  // back to the length that was set, waiting for Start
+  }); },
+  cdSetDur:function(arg){
+    var box=$('#cdDur'), v=(typeof arg==='string')?(+arg)*1000:parseLength(box&&box.value);
+    if(v==null||!(v>0)){ toast('Type a length like 15:00 or 15'); return; }
+    v=Math.min(v,24*3600000);
+    commit(function(st,g){ var c=g.cd; c.ms=c.set=v; c.running=false; c.t0=0; c.target=0; });
+    if(box&&typeof arg!=='string') box.value='';
+    toast('Countdown set to '+fmtCount(v)+'. Press Start when ready.');
+  },
+  cdSetAt:function(){
+    var box=$('#cdAt'), t=parseTarget(box&&box.value);
+    if(t===null){ toast('Type a time like 4:30 PM or 16:30'); return; }
+    if(t===-1){ toast('That time has already passed today'); return; }
+    commit(function(st,g){ var c=g.cd; c.target=t+timeOffset; c.ms=c.set=Math.max(0,t-Date.now()); c.running=false; run(c); });
+    box.value='';
+    toast('Counting down to '+cdTargetText(S.game.cd));
+  }
+};
+Object.keys(CDACT).forEach(function(k){ ACT[k]=CDACT[k]; });
+
+/* ---- the Countdown tab ---- */
+function cdPane(){
+  return '<div class="pane" data-pane="cd">'+
+    '<div class="card"><button class="btn go" style="width:100%" data-act="cdShow" data-live="cdBtn"></button>'+
+      '<p class="note">For when you\'re off air. It sits where the scoreboard sits, with the same look (Look tab), and the scoreboard steps aside while it is on.</p></div>'+
+    '<div class="card"><h3>Which screen</h3><div class="grid g3" style="margin-top:0">'+
+      '<button class="btn" data-act="cdMode:pre" data-cdmode="pre">Pregame</button><button class="btn" data-act="cdMode:half" data-cdmode="half">Halftime</button>'+
+      B('cdMode','⇄ Switch')+'</div><p class="note" data-live="cdModeNote"></p></div>'+
+    '<div class="card"><div class="lbl" data-live="cdLabel"></div><div class="big" data-live="cdTime"></div>'+
+      '<p class="note" data-live="cdState" style="margin-top:0"></p>'+
+      '<div class="grid g3"><button class="btn primary" data-act="cdStart" data-live="cdStartBtn">▶ Start</button>'+
+      '<button class="btn" data-act="cdPause">❚❚ Pause</button><button class="btn" data-act="cdReset">↺ Reset</button></div></div>'+
+    '<div class="card"><h3>Set the countdown</h3>'+
+      '<div class="grid g4" style="margin-top:0">'+B('cdSetDur:300','5:00')+B('cdSetDur:600','10:00')+B('cdSetDur:900','15:00')+B('cdSetDur:1200','20:00')+'</div>'+
+      '<div class="lbl" style="margin-top:12px">A length</div>'+
+      '<div class="inline" style="margin-top:4px"><input id="cdDur" placeholder="e.g. 15:00 or 15" autocomplete="off" data-enter="cdSetDur">'+B('cdSetDur','Set length')+'</div>'+
+      '<div class="lbl" style="margin-top:12px">Or count to a clock time</div>'+
+      '<div class="inline" style="margin-top:4px"><input id="cdAt" placeholder="e.g. 4:30 PM" autocomplete="off" data-enter="cdSetAt">'+B('cdSetAt','Set time')+'</div>'+
+      '<p class="note">A length waits for Start. A clock time starts counting straight away and always lines up with that time, so Start after a pause catches up to it. At 0:00 the countdown stops and holds.</p></div>'+
+  '</div>';
+}
+function syncCountdown(){                // called from syncPanel on every change, and by the clock every second
+  var o=panelOut; if(!o.cdBtn) return;
+  var g=S.game, C=g.cd, T=S.settings.teams, r=rem(C), on=!!C.show;
+  o.cdBtn.innerHTML=(on?'■ Hide countdown':'▶ Show countdown')+keyFor('cdShow'); o.cdBtn.classList.toggle('running',on);
+  $$('[data-cdmode]',el.panel).forEach(function(n){ n.classList.toggle('on',(C.mode==='half'?'half':'pre')===n.dataset.cdmode); });
+  o.cdModeNote.textContent=C.mode==='half'
+    ? 'HALFTIME band, the score from the Game tab ('+(T.away.abbr||T.away.name)+' '+g.score.away+' – '+(T.home.abbr||T.home.name)+' '+g.score.home+') and "'+cdLabel('half')+'".'
+    : 'Both teams and "Tip-off in". No scores.';
+  o.cdLabel.textContent=cdLabel(C.mode);
+  if(o.cdTime.textContent!==fmtCount(r)) o.cdTime.textContent=fmtCount(r);
+  var state=C.running?'Running':(r<=0?'Finished: holding at 0:00':'Paused');
+  if(C.target) state+=' · counting to '+cdTargetText(C);
+  if(on&&!cdShown(g)) state+=' · hidden while a full-screen graphic or the names are up';
+  o.cdState.textContent=state;
+  o.cdStartBtn.classList.toggle('on',!!C.running);
+}
+
+/* ============================================================
+   10. START
+   ============================================================ */
+buildPanel();
+render(null);
+relayInit();
+fit();
+if(window.ResizeObserver) new ResizeObserver(fit).observe(el.viewport);
+if(document.fonts&&document.fonts.ready) document.fonts.ready.then(function(){ fitNames(); render(S.game); });
+requestAnimationFrame(tick);
+
+})();
+</script>
+</body>
+</html>
